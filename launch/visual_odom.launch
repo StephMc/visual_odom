@@ -1,0 +1,4 @@
+<launch>
+  <node launch-prefix="xterm -e gdb --args" name="visual_odom" pkg="visual_odom" type="visual_odom" output="screen">
+  </node>
+</launch>

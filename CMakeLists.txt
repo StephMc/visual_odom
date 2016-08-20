@@ -9,7 +9,7 @@ find_package(Eigen REQUIRED)
 
 catkin_package()
 
-include_directories(${catkin_INCLUDE_DIRS})
+include_directories(include ${catkin_INCLUDE_DIRS})
 
 add_executable(visual_odom src/visual_odom.cpp) 
 target_link_libraries(visual_odom ${catkin_LIBRARIES}  ${OpenCV_LIBS})
