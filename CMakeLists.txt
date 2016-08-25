@@ -6,10 +6,11 @@ find_package(catkin REQUIRED COMPONENTS std_msgs tf sensor_msgs image_transport 
 find_package( OpenCV REQUIRED )
 find_package(cmake_modules REQUIRED)
 find_package(Eigen REQUIRED)
+find_package(Ceres REQUIRED)
 
 catkin_package()
 
-include_directories(include ${catkin_INCLUDE_DIRS})
+include_directories(include ${catkin_INCLUDE_DIRS} ${CERES_INCLUDE_DIRS})
 
 add_executable(visual_odom src/visual_odom.cpp) 
-target_link_libraries(visual_odom ${catkin_LIBRARIES}  ${OpenCV_LIBS})
+target_link_libraries(visual_odom ${catkin_LIBRARIES}  ${OpenCV_LIBS} ${CERES_LIBRARIES})

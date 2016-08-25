@@ -4,19 +4,25 @@
 class VisualOdom
 {
 public:
-  VisualOdom();
+  VisualOdom(ros::NodeHandle &nh);
 
 private:
+  struct camera_params
+  {
+    double k1, k2, cx, cy, f, b, rx, ry, rz;
+  };
+  typedef struct camera_params CameraParams;
+
   Eigen::Matrix3d create_rotation_matrix(double ax, double ay, double az);
 
   void findPlotPoints(cv::Mat &grey, cv::Mat &prevGrey,
-      std::vector<cv::Point2f> points[], cv::Mat &frame, cv::Scalar color,
-      std::vector<cv::Point2f> &output);
+      std::vector<cv::Point2f> points, cv::Mat &frame, cv::Scalar color,
+      std::vector<cv::Point2f> &output, std::vector<bool> &errors);
 
-  void calculate3dPoints(std::vector<Eigen::Vector3d> &points3d,
+  void calculate3dPoints(std::vector<Eigen::Vector4d> &points3d,
       std::vector<cv::Point2f> points2d[], cv::Point2f midpoint);
 
-  void publishPointCloud(std::vector<Eigen::Vector3d> &points,
+  void publishPointCloud(std::vector<Eigen::Vector4d> &points,
     std::string frame, ros::Publisher &pub);
 
   void correctRadial(std::vector<cv::Point2f> &points, double k1,
@@ -25,17 +31,28 @@ private:
 
   void correctRotation(std::vector<cv::Point2f> &points,
       cv::Scalar color, cv::Mat &frame);
+
+  void detectBadMatches(std::vector<cv::Point2f> &lp,
+      std::vector<cv::Point2f> &rp, std::vector<bool> &errors);
+
+  Eigen::Matrix4d getPoseDiff(std::vector<Eigen::Vector4d> &currPoints,
+      std::vector<Eigen::Vector4d> &keyframePoints);
   
   void callback(const sensor_msgs::ImageConstPtr& left_image,
-      const sensor_msgs::ImageConstPtr& right_image,
-      const geometry_msgs::QuaternionStampedConstPtr& imu_rotation);
+      const sensor_msgs::ImageConstPtr& right_image);
 
-  std::vector<cv::Point2f> lpoints[2], lrpoints[2];
+  std::vector<cv::Point2f> lpoints, lrpoints[2];
   cv::Mat prevLGrey, prevRGrey;
   bool needToInit;
 
   // Publishers
   ros::Publisher cloudPub, debugCloudPub, keyframeCloudPub;
+
+  // Subscribers
+  typedef message_filters::sync_policies::ApproximateTime<
+      sensor_msgs::Image, sensor_msgs::Image> ImageSyncPolicy;
+  message_filters::Subscriber<sensor_msgs::Image> left_sub, right_sub;
+  message_filters::Synchronizer<ImageSyncPolicy> sync;
   
   // LK flow params
   cv::TermCriteria termcrit;
@@ -43,6 +60,8 @@ private:
   
   // Max number of feature to track
   int max_count;
+
+  CameraParams l_cam_params, r_cam_params;
 };
 
 #endif
