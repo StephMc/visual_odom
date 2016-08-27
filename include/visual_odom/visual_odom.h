@@ -26,7 +26,7 @@ private:
     std::string frame, ros::Publisher &pub);
 
   void correctRadial(std::vector<cv::Point2f> &points, double k1,
-      double k2, double cx, double cy, double fx, double fy,
+      double k2, double cx, double cy, double f,
       cv::Scalar color, cv::Mat &frame);
 
   void correctRotation(std::vector<cv::Point2f> &points,
@@ -42,8 +42,10 @@ private:
       const sensor_msgs::ImageConstPtr& right_image);
 
   std::vector<cv::Point2f> lpoints, lrpoints[2];
+  std::vector<Eigen::Vector4d> prevPoints3d;
   cv::Mat prevLGrey, prevRGrey;
   bool needToInit;
+  Eigen::Matrix4d pose;
 
   // Publishers
   ros::Publisher cloudPub, debugCloudPub, keyframeCloudPub;

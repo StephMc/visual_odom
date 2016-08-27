@@ -87,15 +87,16 @@ void VisualOdom::findPlotPoints(cv::Mat &grey, cv::Mat &prevGrey,
 void VisualOdom::calculate3dPoints(std::vector<Eigen::Vector4d> &points3d,
     std::vector<cv::Point2f> points2d[], cv::Point2f midpoint)
 {
-  // TODO Take into account different principal points
+  double focal = (l_cam_params.f + r_cam_params.f) / 2;
+  double fb = focal * r_cam_params.b;
   for (int i = 0; i < points2d[0].size(); ++i)
   {
     cv::Point2f l = points2d[0][i];
     cv::Point2f r = points2d[1][i];
     Eigen::Vector4d p;
-    p(0) = 84.00222 / (l.x - r.x);
-    p(1) = -((l.x - midpoint.x) * p(0)) / 700.0185; 
-    p(2) = -((l.y - midpoint.y) * p(0)) / 700.0185;
+    p(0) = fb / (l.x - r.x);
+    p(1) = -((l.x - midpoint.x) * p(0)) / focal; 
+    p(2) = -((l.y - midpoint.y) * p(0)) / focal;
     p(3) = 1;
     points3d.push_back(p);
   }
@@ -121,26 +122,27 @@ void VisualOdom::publishPointCloud(std::vector<Eigen::Vector4d> &points,
 }
 
 void VisualOdom::correctRadial(std::vector<cv::Point2f> &points,
-    double k1, double k2, double cx, double cy, double fx, double fy,
+    double k1, double k2, double cx, double cy, double f,
     cv::Scalar color, cv::Mat &frame)
 {
   for (int i = 0; i < points.size(); ++i)
   {
-    double x = (points[i].x - cx) / fx;
-    double y = (points[i].y - cy) / fy;
+    double x = (points[i].x - cx) / f;
+    double y = (points[i].y - cy) / f;
     double r2 = x * x + y * y;
-    points[i].x = (x * (1 + k1 * r2 + k2 * r2 * r2)) * fx + cx;
-    points[i].y = (y * (1 + k1 * r2 + k2 * r2 * r2)) * fy + cy;
+    points[i].x = (x * (1 + k1 * r2 + k2 * r2 * r2)) * f + cx;
+    points[i].y = (y * (1 + k1 * r2 + k2 * r2 * r2)) * f + cy;
     cv::circle(frame, points[i], 3, color, -1, 8);
   }
 }
 
 void VisualOdom::correctRotation(std::vector<cv::Point2f> &points, cv::Scalar color, cv::Mat &frame)
 {
-  Eigen::Matrix3d rotationMat = create_rotation_matrix(0.0166458, -0.0119791, 0.00187882);
+  Eigen::Matrix3d rotationMat = create_rotation_matrix(-r_cam_params.rx,
+      -r_cam_params.ry, -r_cam_params.rz);
   for (int i = 0; i < points.size(); ++i)
   {
-    Eigen::Vector3d p(points[i].x, points[i].y, 700.642);
+    Eigen::Vector3d p(points[i].x, points[i].y, r_cam_params.f);
     p = rotationMat * p;
     points[i].x = p(0);
     points[i].y = p(1);
@@ -187,54 +189,6 @@ struct PointDistResidual {
   const Eigen::Vector4d b_;
 };
 
-struct PointDistRotResidual {
-  PointDistRotResidual(Eigen::Vector4d a, Eigen::Vector4d b)
-      : a_(a), b_(b) {}
-  template <typename T> bool operator()(const T* const rotation,
-                                        T* residual) const
-  {
-    // Rotate a by the passed in rotation and translation
-    T R[9];
-    ceres::EulerAnglesToRotationMatrix<T>(rotation, 3, R);
-    T x = R[0] * T(a_(0)) + R[1] * T(a_(1)) + R[2]* T(a_(2));
-    T y = R[3] * T(a_(0)) + R[4] * T(a_(1)) + R[5]* T(a_(2));
-    T z = R[6] * T(a_(0)) + R[7] * T(a_(1)) + R[8]* T(a_(2));
-    x = x - T(b_(0));
-    y = y - T(b_(1));
-    z = z - T(b_(2));
-    residual[0] = x * x;
-    residual[1] = y * y;
-    residual[2] = z * z;
-    return true;
-  }
- private:
-  const Eigen::Vector4d a_;
-  const Eigen::Vector4d b_;
-};
-
-struct PointDistTransResidual {
-  PointDistTransResidual(Eigen::Vector4d a, Eigen::Vector4d b)
-      : a_(a), b_(b) {}
-  template <typename T> bool operator()(const T* const translation,
-                                        T* residual) const
-  {
-    // Rotate a by the passed in rotation and translation
-    T x = T(a_(0)) - translation[0];
-    T y = T(a_(1)) - translation[1];
-    T z = T(a_(2)) - translation[2];
-    x = x - T(b_(0));
-    y = y - T(b_(1));
-    z = z - T(b_(2));
-    residual[0] = x * x;
-    residual[1] = y * y;
-    residual[2] = z * z;
-    return true;
-  }
- private:
-  const Eigen::Vector4d a_;
-  const Eigen::Vector4d b_;
-};
-
 Eigen::Matrix4d VisualOdom::getPoseDiff(
     std::vector<Eigen::Vector4d> &currPoints,
     std::vector<Eigen::Vector4d> &keyframePoints)
@@ -247,17 +201,6 @@ Eigen::Matrix4d VisualOdom::getPoseDiff(
         new ceres::AutoDiffCostFunction<PointDistResidual, 3, 3, 3>(new PointDistResidual(currPoints[i], keyframePoints[i])),
         new ceres::HuberLoss(1.0), rotation, translation);
   }
-
-  /*for (int i = 0; i < currPoints.size(); ++i) {
-    problem.AddResidualBlock(
-        new ceres::AutoDiffCostFunction<PointDistRotResidual, 3, 3>(new PointDistRotResidual(currPoints[i], keyframePoints[i])),
-        new ceres::HuberLoss(1.0), rotation);
-  }*/
-  /*for (int i = 0; i < currPoints.size(); ++i) {
-    problem.AddResidualBlock(
-        new ceres::AutoDiffCostFunction<PointDistTransResidual, 3, 3>(new PointDistTransResidual(currPoints[i], keyframePoints[i])),
-        new ceres::HuberLoss(1.0), translation);
-  }*/
 
   ceres::Solver::Options options;
   options.linear_solver_type = ceres::DENSE_QR;
@@ -289,8 +232,7 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
   cv::cvtColor(frame_left, lgrey, cv::COLOR_BGR2GRAY);
   cv::cvtColor(frame_right, rgrey, cv::COLOR_BGR2GRAY);
 
-  // needToInit = lpoints.size() < max_count / 4 || time expired;
-
+  bool got_new_points = false;
   if (needToInit)
   {
     cv::goodFeaturesToTrack(lgrey, lpoints, max_count, 0.01, 10,
@@ -300,8 +242,10 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     lgrey.copyTo(prevLGrey);
     lrpoints[0].resize(lpoints.size());
     lrpoints[1].resize(lpoints.size());
-  }
-  else if(!lpoints.empty())
+  } 
+ 
+  // TODO: Handle complete loss of lpoints
+  if (!lpoints.empty())
   {
     std::vector<bool> errors;
     errors.resize(lpoints.size());
@@ -313,15 +257,17 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     cv::swap(prevLGrey, lgrey);
 
     // Need to correct for rotation between camera and radial distortion
-    correctRadial(lrpoints[0], -0.169477, 0.0221934, 357.027, 246.735,
-        699.395, 699.395, cv::Scalar(255, 0, 255), frame_right);
-    correctRadial(lrpoints[1], -0.170306, 0.0233104, 319.099, 218.565,
-        700.642, 700.642, cv::Scalar(255, 0, 255), frame_right);
+    correctRadial(lrpoints[0],
+        l_cam_params.k1, l_cam_params.k2,
+        l_cam_params.cx, l_cam_params.cy,
+        l_cam_params.f, cv::Scalar(255, 0, 255), frame_right);
+    correctRadial(lrpoints[1],
+        r_cam_params.k1, r_cam_params.k2,
+        r_cam_params.cx, r_cam_params.cy,
+        r_cam_params.f, cv::Scalar(255, 0, 255), frame_right);
     correctRotation(lrpoints[0], cv::Scalar(255, 0, 0), frame_right);
-
     detectBadMatches(lrpoints[0], lrpoints[1], errors); 
 
-    static std::vector<Eigen::Vector4d> prevPoints3d;
     static bool pointsInit = false;
     for (int i = lpoints.size() - 1; i >= 0; --i)
     {
@@ -338,7 +284,8 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     }
 
     // Calculate 3d points
-    cv::Point2d pp(338.063, 232.65);
+    cv::Point2d pp((l_cam_params.cx + r_cam_params.cx) / 2,
+        (l_cam_params.cy + r_cam_params.cy) / 2);
     std::vector<Eigen::Vector4d> points3d, tPoints3d;
     calculate3dPoints(points3d, lrpoints, pp);
     publishPointCloud(points3d, "camera", cloudPub);
@@ -349,7 +296,7 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
       pointsInit = true;
     }
 
-    Eigen::Matrix4d pose = getPoseDiff(points3d, prevPoints3d);
+    pose = getPoseDiff(points3d, prevPoints3d);
 
     // Rotate points to align to key frame for debug
     for (int i = 0; i < points3d.size(); ++i)
@@ -361,18 +308,14 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     static tf::TransformBroadcaster br;
     tf::Transform transform;
     transform.setOrigin(tf::Vector3(-pose(0, 3), -pose(1, 3), -pose(2, 3)));
-    //transform.setOrigin(tf::Vector3(0, 0, 0));
     tf::Quaternion q;
     Eigen::Matrix3d rotMat = pose.block<3, 3>(0, 0);
     Eigen::Vector3d rot = rotMat.eulerAngles(0, 1, 2); 
     q.setRPY(rot(0), rot(1), rot(2));
-    //q.setRPY(0, 0, 0);
     transform.setRotation(q);
     br.sendTransform(tf::StampedTransform(
           transform, ros::Time::now(), "map", "camera")); 
-
   }
-
   needToInit = false;
   cv::imshow("Left debug", frame_left);
   cv::imshow("Right debug", frame_right);
