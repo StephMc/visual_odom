@@ -23,7 +23,7 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
     termcrit(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.03),
     subPixWinSize(10,10),
     winSize(31,31),
-    max_count(100),
+    max_count(200),
     left_sub(nh, "/usb_cam/left/image_raw", 1),
     right_sub(nh, "/usb_cam/right/image_raw", 1),
     sync(ImageSyncPolicy(10), left_sub, right_sub)
@@ -39,9 +39,13 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
 
   CameraParams lp = {-0.169477, 0.0221934, 357.027, 246.735, 699.395, 0.12,
       0, 0, 0};
+  //CameraParams lp = {-0.173774, 0.0262478, 663.473, 351.115, 699.277, 0.12,
+  //    0, 0, 0};
   l_cam_params = lp;
   CameraParams rp = {-0.170306, 0.0233104, 319.099, 218.565, 700.642, 0.12,
       -0.0166458, 0.0119791, -0.00187882};
+  //CameraParams rp = {-0.172575, 0.0255858, 673.393, 349.306, 700.72, 0.12,
+  //    -0.00251904, 0.0139689, 0.000205762};
   r_cam_params = rp;
 }
 
@@ -158,7 +162,7 @@ void VisualOdom::detectBadMatches(std::vector<cv::Point2f> &lp,
     // If the points are not approximatly parallel then they cannot
     // be a good feature point match.
     // Points need to be corrected for any distortion for this to work.
-    errors[i] = fabs(lp[i].y - rp[i].y) > 2 | errors[i];
+    errors[i] = fabs(lp[i].y - rp[i].y) > 3 | errors[i];
   }
 }
 
@@ -217,6 +221,71 @@ Eigen::Matrix4d VisualOdom::getPoseDiff(
   return pose;
 }
  
+struct ImageDistResidual {
+  ImageDistResidual(cv::Point2f orig, Eigen::Vector4d p,
+      VisualOdom::CameraParams cparams)
+      : orig_(orig), p_(p), cparams_(cparams) {}
+  template <typename T> bool operator()(const T* const rotation,
+                                        const T* const translation,
+                                        T* residual) const
+  {
+    // Rotate a by the passed in rotation and translation
+    T R[9];
+    ceres::EulerAnglesToRotationMatrix<T>(rotation, 3, R);
+    T x = R[0] * T(p_(0)) + R[1] * T(p_(1)) + R[2]* T(p_(2)) - translation[0];
+    T y = R[3] * T(p_(0)) + R[4] * T(p_(1)) + R[5]* T(p_(2)) - translation[1];
+    T z = R[6] * T(p_(0)) + R[7] * T(p_(1)) + R[8]* T(p_(2)) - translation[2];
+   
+    // Convert back into 2d space
+    T xl = ((-y * T(cparams_.f)) / x) + T(cparams_.cx);
+    T yl = ((-z * T(cparams_.f)) / x) + T(cparams_.cy);
+
+    // Calculate the error between reprojected points
+    T ex = xl - T(orig_.x);
+    T ey = yl - T(orig_.y);
+    residual[0] = ex * ex;
+    residual[1] = ey * ey;
+    return true;
+  }
+ private:
+  const cv::Point2f orig_;
+  const Eigen::Vector4d p_;
+  const VisualOdom::CameraParams cparams_;
+};
+
+Eigen::Matrix4d VisualOdom::getPoseDiffImageSpace(
+    std::vector<cv::Point2f> prevPoints,
+    std::vector<Eigen::Vector4d> currPoints)
+{
+  ceres::Problem problem;
+  CameraParams cp = {0, 0,
+      (l_cam_params.cx + r_cam_params.cx) / 2,
+      (l_cam_params.cy + r_cam_params.cy) / 2,
+      (l_cam_params.f + r_cam_params.f) / 2,
+      0, 0, 0, 0};
+  double rotation[3] = {0, 0, 0};
+  double translation[3] = {0, 0, 0};
+  for (int i = 0; i < currPoints.size(); ++i) {
+    problem.AddResidualBlock(
+        new ceres::AutoDiffCostFunction<ImageDistResidual, 2, 3, 3>(new ImageDistResidual(prevPoints[i], currPoints[i], cp)),
+        new ceres::HuberLoss(1.0), rotation, translation);
+  }
+
+  ceres::Solver::Options options;
+  options.linear_solver_type = ceres::DENSE_QR;
+  options.minimizer_progress_to_stdout = true;
+
+  ceres::Solver::Summary summary;
+  ceres::Solve(options, &problem, &summary);
+  ROS_WARN_STREAM("Summary: " << summary.BriefReport());
+  ROS_ERROR_STREAM("Rotation" << rotation[0] << " " << rotation[1] << " " << rotation[2]);
+  ROS_ERROR_STREAM("Translation" << translation[0] << " " << translation[1] << " " << translation[2]);
+  Eigen::Affine3d r(create_rotation_matrix(rotation[0] * (M_PI / 180.0), rotation[1] * (M_PI / 180.0), rotation[2] * (M_PI / 180.0)));
+  Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(-translation[0], -translation[1], -translation[2])));
+  Eigen::Matrix4d pose = (t * r).matrix();
+  return pose;
+}
+
 void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     const sensor_msgs::ImageConstPtr& right_image)
 {
@@ -253,14 +322,12 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
         cv::Scalar(0, 255, 0), lrpoints[0], errors);
     findPlotPoints(rgrey, lgrey, lrpoints[0], frame_right,
         cv::Scalar(0, 255, 0), lrpoints[1], errors);
-    lpoints = lrpoints[0];
-    cv::swap(prevLGrey, lgrey);
 
     // Need to correct for rotation between camera and radial distortion
     correctRadial(lrpoints[0],
         l_cam_params.k1, l_cam_params.k2,
         l_cam_params.cx, l_cam_params.cy,
-        l_cam_params.f, cv::Scalar(255, 0, 255), frame_right);
+        l_cam_params.f, cv::Scalar(255, 0, 255), frame_left);
     correctRadial(lrpoints[1],
         r_cam_params.k1, r_cam_params.k2,
         r_cam_params.cx, r_cam_params.cy,
@@ -296,7 +363,8 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
       pointsInit = true;
     }
 
-    pose = getPoseDiff(points3d, prevPoints3d);
+    //pose = getPoseDiff(points3d, prevPoints3d);
+    pose = getPoseDiffImageSpace(lpoints, points3d);
 
     // Rotate points to align to key frame for debug
     for (int i = 0; i < points3d.size(); ++i)

@@ -6,13 +6,13 @@ class VisualOdom
 public:
   VisualOdom(ros::NodeHandle &nh);
 
-private:
   struct camera_params
   {
     double k1, k2, cx, cy, f, b, rx, ry, rz;
   };
   typedef struct camera_params CameraParams;
 
+private:
   Eigen::Matrix3d create_rotation_matrix(double ax, double ay, double az);
 
   void findPlotPoints(cv::Mat &grey, cv::Mat &prevGrey,
@@ -37,7 +37,11 @@ private:
 
   Eigen::Matrix4d getPoseDiff(std::vector<Eigen::Vector4d> &currPoints,
       std::vector<Eigen::Vector4d> &keyframePoints);
-  
+ 
+  Eigen::Matrix4d getPoseDiffImageSpace(
+    std::vector<cv::Point2f> prevPoints,
+    std::vector<Eigen::Vector4d> currPoints);
+
   void callback(const sensor_msgs::ImageConstPtr& left_image,
       const sensor_msgs::ImageConstPtr& right_image);
 
