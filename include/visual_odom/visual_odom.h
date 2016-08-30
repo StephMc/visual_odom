@@ -12,6 +12,12 @@ public:
   };
   typedef struct camera_params CameraParams;
 
+  struct camera_pose
+  {
+    double x, y, z, rx, ry, rz;
+  };
+  typedef struct camera_pose CameraPose;
+
 private:
   Eigen::Matrix3d create_rotation_matrix(double ax, double ay, double az);
 
@@ -45,11 +51,11 @@ private:
   void callback(const sensor_msgs::ImageConstPtr& left_image,
       const sensor_msgs::ImageConstPtr& right_image);
 
-  std::vector<cv::Point2f> lpoints, lrpoints[2];
+  std::vector<cv::Point2f> opoints, lpoints, lrpoints[2];
   std::vector<Eigen::Vector4d> prevPoints3d;
   cv::Mat prevLGrey, prevRGrey;
   bool needToInit;
-  Eigen::Matrix4d pose;
+  //Eigen::Matrix4d pose, basePose;
 
   // Publishers
   ros::Publisher cloudPub, debugCloudPub, keyframeCloudPub;
@@ -68,6 +74,7 @@ private:
   int max_count;
 
   CameraParams l_cam_params, r_cam_params;
+  CameraPose currPose, basePose;
 };
 
 #endif

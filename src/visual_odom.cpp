@@ -3,6 +3,7 @@
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/synchronizer.h>
 #include <pcl_ros/point_cloud.h>
+#include <pcl_conversions/pcl_conversions.h>
 #include <pcl/common/transforms.h>
 #include <Eigen/Geometry> 
 #include <opencv2/highgui/highgui.hpp>
@@ -47,6 +48,11 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
   //CameraParams rp = {-0.172575, 0.0255858, 673.393, 349.306, 700.72, 0.12,
   //    -0.00251904, 0.0139689, 0.000205762};
   r_cam_params = rp;
+  //basePose = Eigen::Matrix4d::Identity();
+  //pose = Eigen::Matrix4d::Identity();
+  CameraPose zero = {0, 0, 0, 0, 0, 0};
+  currPose = zero;
+  basePose = zero;
 }
 
 Eigen::Matrix3d VisualOdom::create_rotation_matrix(double ax, double ay, double az) {
@@ -119,7 +125,8 @@ void VisualOdom::publishPointCloud(std::vector<Eigen::Vector4d> &points,
   cloud.height = 1;
   cloud.is_dense = true;
   cloud.header.frame_id = frame;
-  cloud.header.stamp = ros::Time::now().toSec();
+  pcl_conversions::toPCL(ros::Time::now(), cloud.header.stamp);
+  //cloud.header.stamp = ros::Time::now().toSec();
   static int i = 0;
   cloud.header.seq = i++;
   pub.publish(cloud);
@@ -263,8 +270,11 @@ Eigen::Matrix4d VisualOdom::getPoseDiffImageSpace(
       (l_cam_params.cy + r_cam_params.cy) / 2,
       (l_cam_params.f + r_cam_params.f) / 2,
       0, 0, 0, 0};
-  double rotation[3] = {0, 0, 0};
-  double translation[3] = {0, 0, 0};
+  double rotation[3] = {
+    currPose.rx * (180.0 / M_PI),
+    currPose.ry * (180.0 / M_PI),
+    currPose.rz * (180.0 / M_PI)};
+  double translation[3] = {currPose.x, currPose.y, currPose.z};
   for (int i = 0; i < currPoints.size(); ++i) {
     problem.AddResidualBlock(
         new ceres::AutoDiffCostFunction<ImageDistResidual, 2, 3, 3>(new ImageDistResidual(prevPoints[i], currPoints[i], cp)),
@@ -301,13 +311,20 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
   cv::cvtColor(frame_left, lgrey, cv::COLOR_BGR2GRAY);
   cv::cvtColor(frame_right, rgrey, cv::COLOR_BGR2GRAY);
 
-  bool got_new_points = false;
+  static bool pointsInit = false;
+  static ros::Time prev = ros::Time(0);
+  //needToInit = (ros::Time::now() - prev).toSec() > 1;
   if (needToInit)
   {
-    cv::goodFeaturesToTrack(lgrey, lpoints, max_count, 0.01, 10,
+    prev = ros::Time::now();
+    ROS_ERROR("New points!!!");
+    pointsInit = false;
+    //basePose = pose;
+    cv::goodFeaturesToTrack(lgrey, opoints, max_count, 0.01, 10,
         cv::Mat(), 3, 0, 0.04);
-    cv::cornerSubPix(lgrey, lpoints, subPixWinSize, cv::Size(-1,-1),
+    cv::cornerSubPix(lgrey, opoints, subPixWinSize, cv::Size(-1,-1),
         termcrit);
+    lpoints = opoints;
     lgrey.copyTo(prevLGrey);
     lrpoints[0].resize(lpoints.size());
     lrpoints[1].resize(lpoints.size());
@@ -322,6 +339,8 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
         cv::Scalar(0, 255, 0), lrpoints[0], errors);
     findPlotPoints(rgrey, lgrey, lrpoints[0], frame_right,
         cv::Scalar(0, 255, 0), lrpoints[1], errors);
+    lpoints = lrpoints[0];
+    lgrey.copyTo(prevLGrey);
 
     // Need to correct for rotation between camera and radial distortion
     correctRadial(lrpoints[0],
@@ -335,12 +354,12 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     correctRotation(lrpoints[0], cv::Scalar(255, 0, 0), frame_right);
     detectBadMatches(lrpoints[0], lrpoints[1], errors); 
 
-    static bool pointsInit = false;
     for (int i = lpoints.size() - 1; i >= 0; --i)
     {
       if (errors[i])
       {
         lpoints.erase(lpoints.begin() + i);
+        opoints.erase(opoints.begin() + i);
         lrpoints[0].erase(lrpoints[0].begin() + i);
         lrpoints[1].erase(lrpoints[1].begin() + i);
         if (pointsInit)
@@ -356,7 +375,7 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     std::vector<Eigen::Vector4d> points3d, tPoints3d;
     calculate3dPoints(points3d, lrpoints, pp);
     publishPointCloud(points3d, "camera", cloudPub);
-    publishPointCloud(prevPoints3d, "camera", keyframeCloudPub);
+    publishPointCloud(prevPoints3d, "map", keyframeCloudPub);
     if (!pointsInit)
     {
       prevPoints3d = points3d;
@@ -364,22 +383,28 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     }
 
     //pose = getPoseDiff(points3d, prevPoints3d);
-    pose = getPoseDiffImageSpace(lpoints, points3d);
+    Eigen::Matrix4d pose = getPoseDiffImageSpace(opoints, points3d);
 
     // Rotate points to align to key frame for debug
     for (int i = 0; i < points3d.size(); ++i)
     {
       tPoints3d.push_back(pose * points3d[i]);
     }
-    publishPointCloud(tPoints3d, "camera", debugCloudPub);
+    publishPointCloud(tPoints3d, "map", debugCloudPub);
 
     static tf::TransformBroadcaster br;
     tf::Transform transform;
-    transform.setOrigin(tf::Vector3(-pose(0, 3), -pose(1, 3), -pose(2, 3)));
+    currPose.x = pose(0, 3);
+    currPose.y = pose(1, 3);
+    currPose.z = pose(2, 3);
+    transform.setOrigin(tf::Vector3(pose(0, 3), pose(1, 3), pose(2, 3)));
     tf::Quaternion q;
     Eigen::Matrix3d rotMat = pose.block<3, 3>(0, 0);
     Eigen::Vector3d rot = rotMat.eulerAngles(0, 1, 2); 
     q.setRPY(rot(0), rot(1), rot(2));
+    currPose.rx = rot(0);
+    currPose.ry = rot(1);
+    currPose.rz = rot(2);
     transform.setRotation(q);
     br.sendTransform(tf::StampedTransform(
           transform, ros::Time::now(), "map", "camera")); 
