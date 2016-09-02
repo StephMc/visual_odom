@@ -12,5 +12,6 @@ catkin_package()
 
 include_directories(include ${catkin_INCLUDE_DIRS} ${CERES_INCLUDE_DIRS})
 
-add_executable(visual_odom src/visual_odom.cpp) 
+add_executable(visual_odom
+    src/visual_odom.cpp src/keyframe.cpp src/camera_model.cpp) 
 target_link_libraries(visual_odom ${catkin_LIBRARIES}  ${OpenCV_LIBS} ${CERES_LIBRARIES})
