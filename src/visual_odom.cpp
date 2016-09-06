@@ -14,20 +14,27 @@
 #include <cv_bridge/cv_bridge.h>
 #include <tf/transform_broadcaster.h>
 #include <visual_odom/visual_odom.h>
+#include <ceres/ceres.h>
+#include <ceres/rotation.h>
 
 using namespace message_filters;
 
 VisualOdom::VisualOdom(ros::NodeHandle &nh) :
     need_new_keyframe_(true),
-    left_sub_(nh, "/usb_cam/left/image_raw", 1),
-    right_sub_(nh, "/usb_cam/right/image_raw", 1),
+    left_sub_(nh, "/camera/left/image_raw", 1),
+    right_sub_(nh, "/camera/right/image_raw", 1),
     sync_(ImageSyncPolicy(10), left_sub_, right_sub_),
     curr_keyframe_(NULL), prev_keyframe_(NULL),
     camera_model_(
-        CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
-          699.395, 0.12, 0, 0, 0),
-        CameraModel::CameraParams(-0.170306, 0.0233104, 319.099, 218.565,
-          700.642, 0.12, 0.0166458, -0.0119791, 0.00187882))
+        //CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
+        //  699.395, 0.12, 0, 0, 0),
+        //CameraModel::CameraParams(-0.170306, 0.0233104, 319.099, 218.565,
+        //  700.642, 0.12, 0.0166458, -0.0119791, 0.00187882)
+        CameraModel::CameraParams(-0.173774, 0.0262478, 343.473, 231.115,
+          699.277, 0.12, 0, 0, 0),
+        CameraModel::CameraParams(-0.172575, 0.0255858, 353.393, 229.306,
+          700.72, 0.12, -0.00251904, 0.0139689, 0.000205762)
+        )
 {
   // Fetch config parameters
   nh.param("max_feature_count", max_feature_count_, 100);
@@ -36,6 +43,9 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
       std::string("/usb_cam/left/image_raw"));
   nh.param("right_image_topic", right_image_topic,
       std::string("/usb_cam/right/image_raw"));
+
+  // Initialize start pose
+  keyframe_pose_ = Eigen::Matrix4d::Identity();
 
   // Setup image callback
   sync_.registerCallback(
@@ -68,6 +78,202 @@ void VisualOdom::publishPointCloud(std::vector<Eigen::Vector4d> &points,
   pub.publish(cloud);
 }
 
+struct ImageDistResidualInv {
+  ImageDistResidualInv(cv::Point2f orig, Eigen::Vector4d p,
+      CameraModel::CameraParams cparams, bool invert)
+      : orig_(orig), p_(p), cparams_(cparams), invert_(invert) {}
+  template <typename T> bool operator()(const T* const rotation,
+                                        const T* const translation,
+                                        T* residual) const
+  {
+    // Rotate a by the passed in rotation and translation
+    T R[9];
+    ceres::EulerAnglesToRotationMatrix<T>(rotation, 3, R);
+
+    T x, y, z;
+    if (invert_)
+    {
+        x = -R[0] * T(p_(0)) - R[1] * T(p_(1)) - R[2]* T(p_(2))
+          + translation[0];
+        y = -R[3] * T(p_(0)) - R[4] * T(p_(1)) - R[5]* T(p_(2))
+          + translation[1];
+        z = -R[6] * T(p_(0)) - R[7] * T(p_(1)) - R[8]* T(p_(2))
+          + translation[2];
+    }
+    else
+    {
+        x = R[0] * T(p_(0)) + R[1] * T(p_(1)) + R[2]* T(p_(2))
+          - translation[0];
+        y = R[3] * T(p_(0)) + R[4] * T(p_(1)) + R[5]* T(p_(2))
+          - translation[1];
+        z = R[6] * T(p_(0)) + R[7] * T(p_(1)) + R[8]* T(p_(2))
+          - translation[2];
+    }
+    // Convert back into 2d space
+    T xl = ((-y * T(cparams_.f)) / x) + T(cparams_.cx);
+    T yl = ((-z * T(cparams_.f)) / x) + T(cparams_.cy);
+
+    // Calculate the error between reprojected points
+    T ex = xl - T(orig_.x);
+    T ey = yl - T(orig_.y);
+    residual[0] = ex * ex;
+    residual[1] = ey * ey;
+    return true;
+  }
+ private:
+  const cv::Point2f orig_;
+  const Eigen::Vector4d p_;
+  const CameraModel::CameraParams cparams_;
+  const bool invert_;
+};
+
+Eigen::Matrix4d VisualOdom::getPoseDiffKeyframe(
+    std::vector<cv::Point2f>& prevKeyPoints,
+    std::vector<Eigen::Vector4d>& curr3dPoints,
+    std::vector<cv::Point2f>& currKeyPoints,
+    std::vector<Eigen::Vector4d>& prev3dPoints)
+{
+  ceres::Problem problem;
+  CameraModel::CameraParams cp = camera_model_.getAverageCamera();
+  // TODO: Test if providing a better estimate helps
+  // e.g. last cycle's estimate
+  double rotation[3] = {0, 0, 0};
+  double translation[3] = {0, 0, 0};
+  for (int i = 0; i < prevKeyPoints.size(); ++i) {
+    problem.AddResidualBlock(
+        new ceres::AutoDiffCostFunction<ImageDistResidualInv, 2, 3, 3>(
+          new ImageDistResidualInv(prevKeyPoints[i], curr3dPoints[i], cp,
+            false)),
+        new ceres::HuberLoss(1.0), rotation, translation);
+  }
+
+  /*for (int i = 0; i < currKeyPoints.size(); ++i) {
+    problem.AddResidualBlock(
+        new ceres::AutoDiffCostFunction<ImageDistResidualInv, 2, 3, 3>(
+          new ImageDistResidualInv(currKeyPoints[i], prev3dPoints[i], cp,
+            false)),
+        new ceres::HuberLoss(1.0), rotation, translation);
+  }*/
+
+  ceres::Solver::Options options;
+  options.linear_solver_type = ceres::DENSE_QR;
+  options.minimizer_progress_to_stdout = true;
+
+  ceres::Solver::Summary summary;
+  ceres::Solve(options, &problem, &summary);
+  ROS_WARN_STREAM("Summary: " << summary.BriefReport());
+  ROS_ERROR_STREAM("Rotation" << rotation[0] << " " <<
+      rotation[1] << " " << rotation[2]);
+  ROS_ERROR_STREAM("Translation" << translation[0] << " "
+      << translation[1] << " " << translation[2]);
+  Eigen::Affine3d r(create_rotation_matrix(rotation[0] * (M_PI / 180.0),
+        rotation[1] * (M_PI / 180.0), rotation[2] * (M_PI / 180.0)));
+  Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(-translation[0],
+          -translation[1], -translation[2])));
+  Eigen::Matrix4d pose = (t * r).matrix();
+  return pose;
+}
+
+Eigen::Matrix3d VisualOdom::create_rotation_matrix(double ax, double ay, double az) {
+  Eigen::Matrix3d rx =
+      Eigen::Matrix3d(Eigen::AngleAxisd(ax, Eigen::Vector3d(1, 0, 0)));
+  Eigen::Matrix3d ry =
+      Eigen::Matrix3d(Eigen::AngleAxisd(ay, Eigen::Vector3d(0, 1, 0)));
+  Eigen::Matrix3d rz =
+      Eigen::Matrix3d(Eigen::AngleAxisd(az, Eigen::Vector3d(0, 0, 1)));
+  return rz * ry * rx;
+}
+
+void VisualOdom::removeFeatures(std::vector<cv::Point2f> &lpoints,
+    std::vector<cv::Point2f> &rpoints, std::vector<cv::Point2f> &cpoints,
+    std::vector<uchar> &status)
+{
+  for (int i = lpoints.size() - 1; i >= 0; --i)
+  {
+    if (status[i]) continue;
+    lpoints.erase(lpoints.begin() + i);
+    rpoints.erase(rpoints.begin() + i);
+    cpoints.erase(cpoints.begin() + i);
+  }
+}
+
+void VisualOdom::drawPoints(cv::Mat& frame,
+    std::vector<cv::Point2f> points, cv::Scalar color)
+{
+  for (int i = 0; i < points.size(); ++i)
+  {
+    cv::circle(frame, points[i], 3, color, -1, 8);
+  }
+}
+
+std::vector<cv::Point2f> VisualOdom::calculate3dPoints(cv::Mat& keyframe,
+    std::vector<cv::Point2f> keyframe_features, cv::Mat &lframe,
+    cv::Mat &rframe, std::vector<Eigen::Vector4d> &points3d)
+{
+  std::vector<uchar> status1, status2;
+  std::vector<float> err;
+  std::vector<cv::Point2f> lpoints, rpoints, corrected_features;
+  lpoints.resize(keyframe_features.size());
+  rpoints.resize(keyframe_features.size());
+  corrected_features = keyframe_features;
+
+  cv::TermCriteria 
+    termcrit(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.03);
+  cv::Size subPixWinSize(10, 10), winSize(31, 31);
+ 
+  // Match between keyframe frame and current frame
+  cv::calcOpticalFlowPyrLK(
+      keyframe, lframe, keyframe_features, lpoints, status1, err, winSize,
+      3, termcrit, 0, 0.001);
+  removeFeatures(lpoints, rpoints, corrected_features, status1);
+
+  // Match between current left and right frame
+  cv::calcOpticalFlowPyrLK(
+      lframe, rframe, lpoints, rpoints, status2, err, winSize, 3,
+      termcrit, 0, 0.001);
+  removeFeatures(lpoints, rpoints, corrected_features, status2);
+
+  // Correct points for distortion
+  camera_model_.correctRadial(lpoints, lpoints, CameraModel::LEFT_CAMERA);
+  camera_model_.correctRadial(rpoints, rpoints,
+      CameraModel::RIGHT_CAMERA);
+  camera_model_.correctRotation(rpoints, rpoints);
+
+  // Remove matches not on epipolar line
+  std::vector<uchar> status;
+  for (int i = 0; i < lpoints.size(); ++i)
+  {
+    status.push_back(fabs(lpoints[i].y - rpoints[i].y) < 5 ? 1 : 0);
+  }
+  removeFeatures(lpoints, rpoints, corrected_features, status);
+
+  camera_model_.correctRadial(corrected_features, corrected_features,
+      CameraModel::LEFT_CAMERA);
+
+  // Debug display
+  cv::Mat ld, rd;
+  lframe.copyTo(ld);
+  rframe.copyTo(rd);
+  for (int i = 0; i < lpoints.size(); ++i)
+  {
+    cv::line(ld, corrected_features[i], lpoints[i],
+        cv::Scalar(255, 255, 255), 2, 8);
+  }
+  cv::imshow("left - keyframe", ld);
+
+  for (int i = 0; i < lpoints.size(); ++i)
+  {
+    cv::line(rd, lpoints[i], rpoints[i], cv::Scalar(255, 255, 255),
+        2, 8);
+  }
+  cv::imshow("right - keyframe", rd);
+  cv::waitKey(1);
+
+  points3d.resize(lpoints.size());
+  camera_model_.calculate3dPoints(points3d, lpoints, rpoints); 
+  return corrected_features;
+}
+
 void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     const sensor_msgs::ImageConstPtr& right_image)
 {
@@ -83,6 +289,7 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
 
   if (need_new_keyframe_)
   {
+    ROS_WARN("Getting new keyframe");
     need_new_keyframe_ = false;
     if (prev_keyframe_ != NULL)
     {
@@ -94,11 +301,51 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
 
     if (prev_keyframe_ != NULL)
     {
+      /*ROS_WARN("Estimating keyframe location");
+
       // Calculate the transform between keyframes
+      std::vector<Eigen::Vector4d> curr_points3d, prev_points3d;
+      std::vector<cv::Point2f> prev_corr =
+          calculate3dPoints(prev_keyframe_->getKeyframe(),
+              prev_keyframe_->getKeyframeRawFeatures(),
+              curr_keyframe_->getKeyframe(),
+              curr_keyframe_->getKeyframeRight(),
+              prev_points3d);
+      std::vector<cv::Point2f> curr_corr = 
+          calculate3dPoints(curr_keyframe_->getKeyframe(),
+              curr_keyframe_->getKeyframeRawFeatures(),
+              prev_keyframe_->getKeyframe(),
+              prev_keyframe_->getKeyframeRight(),
+              curr_points3d);
+
+      Eigen::Matrix4d pose = getPoseDiffKeyframe(
+          prev_corr,
+          prev_points3d,
+          curr_corr,
+          curr_points3d);*/
+
+      // Add to last keyframe estimate
+      keyframe_pose_ = keyframe_pose_ * camera_pose_;
     }
   } 
 
-  Eigen::Matrix4d pose = curr_keyframe_->getRelativePose(lgrey, rgrey);
+  // Publish keyframe transform
+  tf::Transform ktransform;
+  ktransform.setOrigin(
+      tf::Vector3(keyframe_pose_(0, 3), keyframe_pose_(1, 3),
+          keyframe_pose_(2, 3)));
+
+  tf::Quaternion kq;
+  Eigen::Matrix3d krotMat = keyframe_pose_.block<3, 3>(0, 0);
+  Eigen::Vector3d krot = krotMat.eulerAngles(0, 1, 2); 
+  kq.setRPY(krot(0), krot(1), krot(2));
+  ktransform.setRotation(kq);
+
+  br_.sendTransform(tf::StampedTransform(
+      ktransform, ros::Time::now(), "map", "keyframe")); 
+
+  // Get camera pose
+  camera_pose_ = curr_keyframe_->getRelativePose(lgrey, rgrey);
  
   // For debug
   publishPointCloud(curr_keyframe_->getRecent3d(), "camera", cloud_pub_);
@@ -110,16 +357,17 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
   std::vector<Eigen::Vector4d> t_points3d;
   for (int i = 0; i < points3d.size(); ++i)
   {
-    t_points3d.push_back(pose * points3d[i]);
+    t_points3d.push_back(camera_pose_ * points3d[i]);
   }
   publishPointCloud(t_points3d, "keyframe", debug_cloud_pub_);
 
   // Publish transform
   tf::Transform transform;
-  transform.setOrigin(tf::Vector3(pose(0, 3), pose(1, 3), pose(2, 3)));
+  transform.setOrigin(tf::Vector3(camera_pose_(0, 3),
+      camera_pose_(1, 3), camera_pose_(2, 3)));
 
   tf::Quaternion q;
-  Eigen::Matrix3d rotMat = pose.block<3, 3>(0, 0);
+  Eigen::Matrix3d rotMat = camera_pose_.block<3, 3>(0, 0);
   Eigen::Vector3d rot = rotMat.eulerAngles(0, 1, 2); 
   q.setRPY(rot(0), rot(1), rot(2));
   transform.setRotation(q);
@@ -129,6 +377,26 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
 
   // Check if we're currently far enough away from the keyframe to
   // trigger getting a new keyframe
+  double max_rad = 0.08; // ~5 degrees
+  double rx = fabs(rot(0));
+  double ry = fabs(rot(1));
+  double rz = fabs(rot(2));
+  rx = rx > (M_PI / 2) ? M_PI - rx : rx;
+  ry = ry > (M_PI / 2) ? M_PI - ry : ry;
+  rz = rz > (M_PI / 2) ? M_PI - rz : rz;
+  ROS_WARN("got rot %lf, %lf, %lf", rx, ry, rz);
+  if (rx > max_rad || ry > max_rad || rz > max_rad)
+  {
+    ROS_INFO("New keyframe by rotation");
+    need_new_keyframe_ = true;
+  }
+
+  if (sqrt(pow(camera_pose_(0, 3), 2) + pow(camera_pose_(1, 3), 2) +
+        pow(camera_pose_(2, 3), 2)) > 0.5)
+  {
+    ROS_INFO("New keyframe by translation");
+    need_new_keyframe_ = true;
+  }
 }
 
 int main(int argc, char** argv)
