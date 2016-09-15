@@ -133,11 +133,11 @@ struct ImageDistResidual {
   {
     // Rotate a by the passed in rotation and translation
     T R[9];
-    /*T rot[3];
+    T rot[3];
     rot[0] = rotation[0] / T(2);
     rot[1] = rotation[1] / T(2);
-    rot[2] = rotation[2] / T(2);*/
-    ceres::EulerAnglesToRotationMatrix<T>(rotation, 3, R);
+    rot[2] = rotation[2] / T(2);
+    ceres::EulerAnglesToRotationMatrix<T>(rot, 3, R);
     T x = R[0] * T(p_(0)) + R[1] * T(p_(1)) + R[2]* T(p_(2))
         - translation[0];
     T y = R[3] * T(p_(0)) + R[4] * T(p_(1)) + R[5]* T(p_(2))

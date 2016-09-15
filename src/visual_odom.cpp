@@ -16,28 +16,33 @@
 #include <visual_odom/visual_odom.h>
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
+#include <nav_msgs/Odometry.h>
+#include <boost/assign.hpp>
 
 using namespace message_filters;
 
 VisualOdom::VisualOdom(ros::NodeHandle &nh) :
     need_new_keyframe_(true),
-    left_sub_(nh, "/camera/left/image_raw", 1),
-    right_sub_(nh, "/camera/right/image_raw", 1),
+    //left_sub_(nh, "/camera/left/image_raw", 1),
+    left_sub_(nh, "/usb_cam/left/image_raw", 1),
+    //right_sub_(nh, "/camera/right/image_raw", 1),
+    right_sub_(nh, "/usb_cam/right/image_raw", 1),
     sync_(ImageSyncPolicy(10), left_sub_, right_sub_),
     curr_keyframe_(NULL), prev_keyframe_(NULL),
     camera_model_(
-        //CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
-        //  699.395, 0.12, 0, 0, 0),
-        //CameraModel::CameraParams(-0.170306, 0.0233104, 319.099, 218.565,
-        //  700.642, 0.12, 0.0166458, -0.0119791, 0.00187882)
-        CameraModel::CameraParams(-0.173774, 0.0262478, 343.473, 231.115,
-          699.277, 0.12, 0, 0, 0),
-        CameraModel::CameraParams(-0.172575, 0.0255858, 353.393, 229.306,
-          700.72, 0.12, -0.00251904, 0.0139689, 0.000205762)
+        CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
+            699.395, 0.12, 0, 0, 0),
+        CameraModel::CameraParams(-0.170306, 0.0233104, 319.099, 218.565,
+            //700.642, 0.12, 0.0166458, -0.0119791, 0.00187882)
+            700.642, 0.12, 0.0166458, 0.0119791, 0.00187882)
+        //CameraModel::CameraParams(-0.173774, 0.0262478, 343.473, 231.115,
+        //  699.277, 0.12, 0, 0, 0),
+        //CameraModel::CameraParams(-0.172575, 0.0255858, 353.393, 229.306,
+        //  700.72, 0.12, -0.00251904, 0.0139689, 0.000205762)
         )
 {
   // Fetch config parameters
-  nh.param("max_feature_count", max_feature_count_, 100);
+  nh.param("max_feature_count", max_feature_count_, 50);
   std::string left_image_topic, right_image_topic;
   nh.param("left_image_topic", left_image_topic,
       std::string("/usb_cam/left/image_raw"));
@@ -57,6 +62,9 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
       nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("debug_cloud", 1);
   keyframe_cloud_pub_ =
       nh.advertise<pcl::PointCloud<pcl::PointXYZ> > ("keyframe_cloud", 1);
+
+  // Setup odometry publisher
+  odom_pub_ = nh.advertise<nav_msgs::Odometry>("vo", 1);
 }
 
 void VisualOdom::publishPointCloud(std::vector<Eigen::Vector4d> &points,
@@ -287,46 +295,12 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
   cv::cvtColor(frame_left, lgrey, cv::COLOR_BGR2GRAY);
   cv::cvtColor(frame_right, rgrey, cv::COLOR_BGR2GRAY);
 
-  if (need_new_keyframe_)
+  if (curr_keyframe_ == NULL)
   {
-    ROS_WARN("Getting new keyframe");
+    ROS_WARN("Initializing");
     need_new_keyframe_ = false;
-    if (prev_keyframe_ != NULL)
-    {
-      free(prev_keyframe_);
-    }
-    prev_keyframe_ = curr_keyframe_;
     curr_keyframe_ = new Keyframe(lgrey, rgrey, camera_model_,
         max_feature_count_);
-
-    if (prev_keyframe_ != NULL)
-    {
-      /*ROS_WARN("Estimating keyframe location");
-
-      // Calculate the transform between keyframes
-      std::vector<Eigen::Vector4d> curr_points3d, prev_points3d;
-      std::vector<cv::Point2f> prev_corr =
-          calculate3dPoints(prev_keyframe_->getKeyframe(),
-              prev_keyframe_->getKeyframeRawFeatures(),
-              curr_keyframe_->getKeyframe(),
-              curr_keyframe_->getKeyframeRight(),
-              prev_points3d);
-      std::vector<cv::Point2f> curr_corr = 
-          calculate3dPoints(curr_keyframe_->getKeyframe(),
-              curr_keyframe_->getKeyframeRawFeatures(),
-              prev_keyframe_->getKeyframe(),
-              prev_keyframe_->getKeyframeRight(),
-              curr_points3d);
-
-      Eigen::Matrix4d pose = getPoseDiffKeyframe(
-          prev_corr,
-          prev_points3d,
-          curr_corr,
-          curr_points3d);*/
-
-      // Add to last keyframe estimate
-      keyframe_pose_ = keyframe_pose_ * camera_pose_;
-    }
   } 
 
   // Publish keyframe transform
@@ -375,9 +349,67 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
   br_.sendTransform(tf::StampedTransform(
         transform, ros::Time::now(), "keyframe", "camera")); 
 
+  // Publish odometry
+  Eigen::Matrix4d current_pose = keyframe_pose_ * camera_pose_;
+  nav_msgs::Odometry odom;
+  static unsigned int seq_odom = 0;
+  odom.header.seq = seq_odom++;
+  odom.header.stamp = ros::Time::now();
+  odom.header.frame_id = "map";
+  odom.child_frame_id = "vo_child_frame";
+  
+  // Translation
+  odom.pose.pose.position.x = current_pose(0, 3);
+  odom.pose.pose.position.y = current_pose(1, 3);
+  odom.pose.pose.position.z = current_pose(2, 3);
+  
+  // Rotation
+  Eigen::Matrix3d crotMat = current_pose.block<3, 3>(0, 0);
+  Eigen::Vector3d crot = crotMat.eulerAngles(0, 1, 2); 
+  odom.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(
+      crot(0), crot(1), crot(2));
+
+  odom.pose.covariance = 
+      boost::assign::list_of (1e-2) (0) (0)  (0)  (0)  (0)
+                              (0) (1e-2)  (0)  (0)  (0)  (0)
+                              (0)   (0)  (1e-2) (0)  (0)  (0)
+                              (0)   (0)   (0) (1e-2) (0)  (0)
+                              (0)   (0)   (0)  (0) (1e-2) (0)
+                              (0)   (0)   (0)  (0)  (0)  (1e-2) ;
+
+  odom_pub_.publish(odom);
+
+  static Eigen::Matrix4d prev_pose_ = Eigen::Matrix4d::Identity();
+  Eigen::Matrix4d diff_pose = prev_pose_ * current_pose;
+  prev_pose_ = current_pose;
+  static ros::Time prev_time_ = ros::Time::now();
+  double time_diff = (ros::Time::now() - prev_time_).toSec();
+  prev_time_ = ros::Time::now();
+  if (time_diff == 0) time_diff = 1;
+
+  // Velocity
+  odom.twist.twist.linear.x = diff_pose(0, 3) / time_diff; 
+  odom.twist.twist.linear.y = diff_pose(1, 3) / time_diff; 
+  odom.twist.twist.linear.z = diff_pose(2, 3) / time_diff; 
+
+  // Angular velocity
+  Eigen::Matrix3d vrotMat = diff_pose.block<3, 3>(0, 0);
+  Eigen::Vector3d vrot = vrotMat.eulerAngles(0, 1, 2); 
+  odom.twist.twist.angular.x = vrot(0) / time_diff; 
+  odom.twist.twist.angular.y = vrot(1) / time_diff; 
+  odom.twist.twist.angular.z = vrot(2) / time_diff; 
+
+  odom.twist.covariance = 
+      boost::assign::list_of (1e-2) (0) (0)  (0)  (0)  (0)
+                              (0) (1e-2)  (0)  (0)  (0)  (0)
+                              (0)   (0)  (1e-2) (0)  (0)  (0)
+                              (0)   (0)   (0) (1e-2) (0)  (0)
+                              (0)   (0)   (0)  (0) (1e-2) (0)
+                              (0)   (0)   (0)  (0)  (0)  (1e-2) ;
+
   // Check if we're currently far enough away from the keyframe to
   // trigger getting a new keyframe
-  double max_rad = 0.08; // ~5 degrees
+  double max_rad = 0.16; // ~5 degrees
   double rx = fabs(rot(0));
   double ry = fabs(rot(1));
   double rz = fabs(rot(2));
@@ -397,6 +429,25 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     ROS_INFO("New keyframe by translation");
     need_new_keyframe_ = true;
   }
+
+  if (need_new_keyframe_)
+  {
+    ROS_WARN("Getting new keyframe");
+    need_new_keyframe_ = false;
+    if (prev_keyframe_ != NULL)
+    {
+      free(prev_keyframe_);
+    }
+    prev_keyframe_ = curr_keyframe_;
+    curr_keyframe_ = new Keyframe(lgrey, rgrey, camera_model_,
+        max_feature_count_);
+
+    if (prev_keyframe_ != NULL)
+    {
+      // Add to last keyframe estimate
+      keyframe_pose_ = keyframe_pose_ * camera_pose_;
+    }
+  } 
 }
 
 int main(int argc, char** argv)

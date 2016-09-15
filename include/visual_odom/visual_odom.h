@@ -40,7 +40,8 @@ private:
   Eigen::Matrix4d camera_pose_;
 
   // Publishers
-  ros::Publisher cloud_pub_, debug_cloud_pub_, keyframe_cloud_pub_;
+  ros::Publisher cloud_pub_, debug_cloud_pub_, keyframe_cloud_pub_,
+      odom_pub_;
   tf::TransformBroadcaster br_;
 
   // Subscribers
