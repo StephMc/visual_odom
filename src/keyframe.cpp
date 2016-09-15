@@ -98,6 +98,57 @@ Eigen::Matrix4d Keyframe::getRelativePose(cv::Mat &lframe,
   return getPoseDiffImageSpace(corrected_features_, recent3d_);
 }
 
+
+struct PlaneFitResidual {
+  PlaneFitResidual(Eigen::Vector4d p) : p_(p) {}
+  template <typename T> bool operator()(const T* const plane,
+                                        T* residual) const
+  {
+    if (plane[0] == T(0) && plane[1] == T(0) && plane[2] == T(0))
+    {
+      return false;
+    }
+    residual[0] =
+      (plane[0] * T(p_(0)) + plane[1] * T(p_(1)) +
+       plane[2] * T(p_(2)) + plane[3]) / sqrt(plane[0] * plane[0] +
+       plane[1] * plane[1] + plane[2] * plane[2]);
+    return true;
+  }
+ private:
+  const Eigen::Vector4d p_;
+};
+
+Eigen::Matrix4d Keyframe::getGroundRelativePose()
+{
+  ceres::Problem problem;
+  double plane[4] = {0, 0, -1, 0};
+  for (int i = 0; i < recent3d_.size(); ++i) {
+    problem.AddResidualBlock(
+        new ceres::AutoDiffCostFunction<PlaneFitResidual, 1, 4>(
+          new PlaneFitResidual(recent3d_[i])),
+        new ceres::HuberLoss(1.0), plane);
+  }
+
+  ceres::Solver::Options options;
+  options.linear_solver_type = ceres::DENSE_QR;
+  options.minimizer_progress_to_stdout = true;
+
+  ceres::Solver::Summary summary;
+  ceres::Solve(options, &problem, &summary);
+  ROS_WARN_STREAM("Summary: " << summary.BriefReport());
+  ROS_ERROR_STREAM("Plane" << plane[0] << " " << plane[1] << " " <<
+      plane[2] << " " << plane[3]);
+
+  Eigen::Affine3d r(create_rotation_matrix(atan2(plane[0], plane[2]),
+        atan2(plane[1], plane[2]), 0));
+
+  double d = plane[3] /
+    (sqrt(pow(plane[0], 2) + pow(plane[1], 2) + pow(plane[2], 2)));
+  Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(0, 0, d)));
+  Eigen::Matrix4d pose = (t * r).matrix();
+  return pose;
+}
+
 void Keyframe::removeFeatures(std::vector<cv::Point2f> &lpoints,
     std::vector<cv::Point2f> &rpoints, std::vector<uchar> &status)
 {

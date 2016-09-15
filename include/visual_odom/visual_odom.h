@@ -18,20 +18,6 @@ private:
 
   Eigen::Matrix3d create_rotation_matrix(double ax, double ay, double az);
 
-  void removeFeatures(std::vector<cv::Point2f> &lpoints,
-    std::vector<cv::Point2f> &rpoints, std::vector<cv::Point2f> &cpoints,
-    std::vector<uchar> &status);
-
-  Eigen::Matrix4d getPoseDiffKeyframe(
-    std::vector<cv::Point2f>& prevKeyPoints,
-    std::vector<Eigen::Vector4d>& curr3dPoints,
-    std::vector<cv::Point2f>& currKeyPoints,
-    std::vector<Eigen::Vector4d>& prev3dPoints);
-
-  std::vector<cv::Point2f> calculate3dPoints(cv::Mat& keyframe,
-    std::vector<cv::Point2f> keyframe_features, cv::Mat &lframe,
-    cv::Mat &rframe, std::vector<Eigen::Vector4d> &points3d);
-
   void callback(const sensor_msgs::ImageConstPtr& left_image,
       const sensor_msgs::ImageConstPtr& right_image);
 

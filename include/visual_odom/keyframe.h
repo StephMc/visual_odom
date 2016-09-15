@@ -14,6 +14,8 @@ public:
 
   Eigen::Matrix4d getRelativePose(cv::Mat& lframe, cv::Mat& rframe);
 
+  Eigen::Matrix4d getGroundRelativePose();
+
   cv::Mat& getKeyframe();
   cv::Mat& getKeyframeRight();
 
