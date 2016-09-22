@@ -37,7 +37,7 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
         CameraModel::CameraParams(-0.173774, 0.0262478, 343.473, 231.115,
           699.277, 0.12, 0, 0, 0),
         CameraModel::CameraParams(-0.172575, 0.0255858, 353.393, 229.306,
-          700.72, 0.12, -0.00251904, 0.0139689, 0.000205762))
+          700.72, 0.12, 0.00251904, 0.0139689, 0.000205762))
 {
   // Fetch config parameters
   nh.param("max_feature_count", max_feature_count_, 50);
@@ -270,6 +270,12 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     need_new_keyframe_ = true;
   }
 
+  if (curr_keyframe_->getKeyframeRawFeatures().size() < 10)
+  {
+    ROS_INFO("New keyframe due to lack of points");
+    need_new_keyframe_ = true;
+  }
+
   if (need_new_keyframe_)
   {
     ROS_WARN("Getting new keyframe");
@@ -282,10 +288,19 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     curr_keyframe_ = new Keyframe(lgrey, rgrey, camera_model_,
         max_feature_count_);
 
+    if (!curr_keyframe_->keyframe_ok_)
+    {
+      need_new_keyframe_ = true;
+      free(curr_keyframe_);
+      curr_keyframe_ = NULL;
+    }
+
     if (prev_keyframe_ != NULL)
     {
-      // Add to last keyframe estimate
-      keyframe_pose_ = keyframe_pose_ * camera_pose_;
+      if (prev_keyframe_->keyframe_ok_) {
+        // Add to last keyframe estimate
+        keyframe_pose_ = keyframe_pose_ * camera_pose_;
+      }
     }
   } 
 }

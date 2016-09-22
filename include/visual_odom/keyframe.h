@@ -24,8 +24,10 @@ public:
 
   std::vector<Eigen::Vector4d>& getRecent3d();
   std::vector<Eigen::Vector4d>& getKeyframe3d();
+
+  bool keyframe_ok_;
 private:
-  void calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
+  bool calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
     std::vector<Eigen::Vector4d> &points3d);
 
   Eigen::Matrix3d create_rotation_matrix(double ax, double ay, double az);

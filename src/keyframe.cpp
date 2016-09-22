@@ -19,7 +19,7 @@ Keyframe::Keyframe(cv::Mat &lframe, cv::Mat &rframe,
       10, cv::Mat(), 3, 0, 0.04);
   cornerSubPix(lframe, raw_features_, subPixWinSize, cv::Size(-1,-1),
       termcrit);
-  
+
   corrected_features_.resize(raw_features_.size());
   camera_model_.correctRadial(raw_features_, corrected_features_,
       CameraModel::LEFT_CAMERA);
@@ -31,10 +31,10 @@ Keyframe::Keyframe(cv::Mat &lframe, cv::Mat &rframe,
 
   keyframe3d_.resize(raw_features_.size());
   recent3d_.resize(raw_features_.size());
-  calculate3dPoints(lframe, rframe, keyframe3d_); 
+  keyframe_ok_ = calculate3dPoints(lframe, rframe, keyframe3d_); 
 }
 
-void Keyframe::calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
+bool Keyframe::calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
     std::vector<Eigen::Vector4d> &points3d)
 {
   std::vector<uchar> status1, status2;
@@ -43,17 +43,35 @@ void Keyframe::calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
   lpoints.resize(recent_features_.size());
   rpoints.resize(recent_features_.size());
 
+  if (recent_features_.empty())
+  {
+    ROS_ERROR("No points aaaaah 1");
+    return false;
+  }
+
   // Match between last frame and current frame
   cv::calcOpticalFlowPyrLK(
       recent_, lframe, recent_features_, lpoints, status1, err, winSize,
       3, termcrit, 0, 0.001);
   removeFeatures(lpoints, rpoints, status1);
+  
+  if (recent_features_.empty())
+  {
+    ROS_ERROR("No points aaaaah 2");
+    return false;
+  }
 
   // Match between current left and right frame
   cv::calcOpticalFlowPyrLK(
       lframe, rframe, lpoints, rpoints, status2, err, winSize, 3,
       termcrit, 0, 0.001);
   removeFeatures(lpoints, rpoints, status2);
+
+  if (recent_features_.empty())
+  {
+    ROS_ERROR("No points aaaaah 3");
+    return false;
+  }
 
   // Save the left frame and found features to use next cycle
   lframe.copyTo(recent_);
@@ -88,13 +106,14 @@ void Keyframe::calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
   cv::imshow("right", rd);
   cv::waitKey(1);
 
-  camera_model_.calculate3dPoints(points3d, lpoints, rpoints); 
+  camera_model_.calculate3dPoints(points3d, lpoints, rpoints);
+  return true;
 }
 
 Eigen::Matrix4d Keyframe::getRelativePose(cv::Mat &lframe,
     cv::Mat& rframe)
 {
-  calculate3dPoints(lframe, rframe, recent3d_);
+  keyframe_ok_ = calculate3dPoints(lframe, rframe, recent3d_);
   return getPoseDiffImageSpace(corrected_features_, recent3d_);
 }
 
@@ -112,6 +131,7 @@ struct PlaneFitResidual {
       (plane[0] * T(p_(0)) + plane[1] * T(p_(1)) +
        plane[2] * T(p_(2)) + plane[3]) / sqrt(plane[0] * plane[0] +
        plane[1] * plane[1] + plane[2] * plane[2]);
+    residual[0] = residual[0] * residual[0];
     return true;
   }
  private:
@@ -139,12 +159,14 @@ Eigen::Matrix4d Keyframe::getGroundRelativePose()
   ROS_ERROR_STREAM("Plane" << plane[0] << " " << plane[1] << " " <<
       plane[2] << " " << plane[3]);
 
-  Eigen::Affine3d r(create_rotation_matrix(atan2(plane[0], plane[2]),
-        atan2(plane[1], plane[2]), 0));
+  double rx = atan2(plane[0], plane[2]);
+  double ry = atan2(plane[1], plane[2]);
+  ROS_ERROR_STREAM("Plane rotation " << rx << " " << ry);
+  Eigen::Affine3d r(create_rotation_matrix(rx, ry, 0));
 
   double d = plane[3] /
     (sqrt(pow(plane[0], 2) + pow(plane[1], 2) + pow(plane[2], 2)));
-  Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(0, 0, d)));
+  Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(0, 0, fabs(d))));
   Eigen::Matrix4d pose = (t * r).matrix();
   return pose;
 }
@@ -217,6 +239,11 @@ Eigen::Matrix4d Keyframe::getPoseDiffImageSpace(
     std::vector<cv::Point2f>& prevPoints,
     std::vector<Eigen::Vector4d>& currPoints)
 {
+  if (!keyframe_ok_)
+  {
+    return Eigen::Matrix4d::Identity();
+  }
+
   ceres::Problem problem;
   CameraModel::CameraParams cp = camera_model_.getAverageCamera();
   // TODO: Test if providing a better estimate helps
