@@ -5,14 +5,16 @@
 #include <opencv2/core/core.hpp>
 #include <vector>
 #include <visual_odom/camera_model.h>
+#include <sensor_msgs/Imu.h>
 
 class Keyframe
 {
 public:
   Keyframe(cv::Mat &lframe, cv::Mat &rframe, CameraModel& camera_model,
-      int max_feature_count);
+      int max_feature_count, sensor_msgs::Imu imu);
 
-  Eigen::Matrix4d getRelativePose(cv::Mat& lframe, cv::Mat& rframe);
+  Eigen::Matrix4d getRelativePose(cv::Mat& lframe, cv::Mat& rframe,
+      Eigen::Vector3d orientation);
 
   Eigen::Matrix4d getGroundRelativePose();
 
@@ -34,7 +36,8 @@ private:
 
   Eigen::Matrix4d getPoseDiffImageSpace(
     std::vector<cv::Point2f>& prevPoints,
-    std::vector<Eigen::Vector4d>& currPoints);
+    std::vector<Eigen::Vector4d>& currPoints,
+    Eigen::Vector3d orientation);
 
   void removeFeatures(std::vector<cv::Point2f> &lpoints,
     std::vector<cv::Point2f> &rpoints, std::vector<uchar> &status);
@@ -52,6 +55,9 @@ private:
 
   // local copy of the last frame
   cv::Mat recent_;
+
+  // Absolute rotation of the keyframe
+  Eigen::Vector3d keyframe_orientation_;
 
   // Uncorrected feature on keyframe
   std::vector<cv::Point2f> raw_features_;

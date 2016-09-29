@@ -27,17 +27,19 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
     //left_sub_(nh, "/usb_cam/left/image_raw", 1),
     right_sub_(nh, "/camera/right/image_raw", 1),
     //right_sub_(nh, "/usb_cam/right/image_raw", 1),
-    sync_(ImageSyncPolicy(10), left_sub_, right_sub_),
+    //imu_sub_(nh, "/imu", 1),
+    imu_sub_(nh, "/mavros/imu/data", 1),
+    sync_(ImageSyncPolicy(10), left_sub_, right_sub_, imu_sub_),
     curr_keyframe_(NULL), prev_keyframe_(NULL),
     camera_model_(
         //CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
         //    699.395, 0.12, 0, 0, 0),
         //CameraModel::CameraParams(-0.170306, 0.0233104, 319.099, 218.565,
-        //    700.642, 0.12, 0.0166458, 0.0119791, 0.00187882)
+        //    700.642, 0.12, 0.0166458, 0.0119791, 0.00187882))
         CameraModel::CameraParams(-0.173774, 0.0262478, 343.473, 231.115,
-          699.277, 0.12, 0, 0, 0),
+            699.277, 0.12, 0, 0, 0),
         CameraModel::CameraParams(-0.172575, 0.0255858, 353.393, 229.306,
-          700.72, 0.12, 0.00251904, 0.0139689, 0.000205762))
+            700.72, 0.12, 0.00251904, 0.0139689, 0.000205762))
 {
   // Fetch config parameters
   nh.param("max_feature_count", max_feature_count_, 50);
@@ -52,7 +54,7 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
 
   // Setup image callback
   sync_.registerCallback(
-      boost::bind(&VisualOdom::callback, this, _1, _2));
+      boost::bind(&VisualOdom::callback, this, _1, _2, _3));
 
   // Setup cloud pubishers
   cloud_pub_ = nh.advertise<pcl::PointCloud<pcl::PointXYZ> >("cloud", 1);
@@ -104,7 +106,8 @@ void VisualOdom::drawPoints(cv::Mat& frame,
 }
 
 void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
-    const sensor_msgs::ImageConstPtr& right_image)
+    const sensor_msgs::ImageConstPtr& right_image,
+    const sensor_msgs::ImuConstPtr& imu)
 {
   // TODO don't copy here
   cv::Mat frame_left = cv_bridge::toCvShare(
@@ -121,7 +124,7 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     ROS_WARN("Initializing");
     need_new_keyframe_ = false;
     curr_keyframe_ = new Keyframe(lgrey, rgrey, camera_model_,
-        max_feature_count_);
+        max_feature_count_, *imu);
   } 
 
   // Publish keyframe transform
@@ -140,10 +143,19 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
       ktransform, ros::Time::now(), "map", "keyframe")); 
 
   // Get camera pose
-  camera_pose_ = curr_keyframe_->getRelativePose(lgrey, rgrey);
+  tf::Quaternion imu_q(imu->orientation.x, imu->orientation.y,
+      imu->orientation.z, imu->orientation.w);
+  tf::Matrix3x3 m(imu_q);
+  double roll, pitch, yaw;
+  m.getRPY(roll, pitch, yaw);
+  Eigen::Vector3d orientation = Eigen::Vector3d(
+      roll * (180 / M_PI), pitch * (180 / M_PI), yaw * (180 / M_PI));
+
+  camera_pose_ = curr_keyframe_->getRelativePose(lgrey, rgrey,
+      orientation);
 
   // Get pose relative to ground (uses latest solution to getRelativePose)
-  Eigen::Matrix4d ground_relative_pose_ =
+  /*Eigen::Matrix4d ground_relative_pose_ =
       curr_keyframe_->getGroundRelativePose();
 
   tf::Transform gtransform;
@@ -159,7 +171,7 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
   gtransform.setRotation(gq);
 
   br_.sendTransform(tf::StampedTransform(
-      gtransform, ros::Time::now(), "ground", "flappy")); 
+      gtransform, ros::Time::now(), "ground", "flappy")); */
  
   // For debug
   publishPointCloud(curr_keyframe_->getRecent3d(), "camera", cloud_pub_);
@@ -286,7 +298,7 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     }
     prev_keyframe_ = curr_keyframe_;
     curr_keyframe_ = new Keyframe(lgrey, rgrey, camera_model_,
-        max_feature_count_);
+        max_feature_count_, *imu);
 
     if (!curr_keyframe_->keyframe_ok_)
     {

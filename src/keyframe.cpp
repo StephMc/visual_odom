@@ -7,9 +7,11 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/calib3d/calib3d.hpp>
 #include <opencv2/video/tracking.hpp>
+#include <tf/transform_datatypes.h>
 
 Keyframe::Keyframe(cv::Mat &lframe, cv::Mat &rframe,
-    CameraModel& camera_model, int max_feature_count) :
+    CameraModel& camera_model, int max_feature_count,
+    sensor_msgs::Imu imu) :
     termcrit(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.03),
     subPixWinSize(10,10),
     winSize(31,31),
@@ -32,6 +34,15 @@ Keyframe::Keyframe(cv::Mat &lframe, cv::Mat &rframe,
   keyframe3d_.resize(raw_features_.size());
   recent3d_.resize(raw_features_.size());
   keyframe_ok_ = calculate3dPoints(lframe, rframe, keyframe3d_); 
+  
+  // TODO: extract std_dev
+  tf::Quaternion q(imu.orientation.x, imu.orientation.y,
+      imu.orientation.z, imu.orientation.w);
+  tf::Matrix3x3 m(q);
+  double roll, pitch, yaw;
+  m.getRPY(roll, pitch, yaw);
+  keyframe_orientation_ = Eigen::Vector3d(
+      roll * (180 / M_PI), pitch * (180 / M_PI), yaw * (180 / M_PI));
 }
 
 bool Keyframe::calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
@@ -111,10 +122,11 @@ bool Keyframe::calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
 }
 
 Eigen::Matrix4d Keyframe::getRelativePose(cv::Mat &lframe,
-    cv::Mat& rframe)
+    cv::Mat& rframe, Eigen::Vector3d orientation)
 {
   keyframe_ok_ = calculate3dPoints(lframe, rframe, recent3d_);
-  return getPoseDiffImageSpace(corrected_features_, recent3d_);
+  return getPoseDiffImageSpace(corrected_features_, recent3d_,
+      orientation);
 }
 
 
@@ -196,10 +208,29 @@ void Keyframe::drawPoints(cv::Mat& frame, std::vector<cv::Point2f> points,
   }
 }
 
+struct ImuResidual {
+  ImuResidual(Eigen::Vector3d rotation, Eigen::Vector3d std_devs) :
+    rotation_(rotation), std_devs_(std_devs) {}
+
+  template<typename T> bool operator()(const T* const rot,
+      T* residual) const
+  {
+    for (int i = 0; i < 3; ++i)
+    {
+      residual[i] = (rot[i] - rotation_[i]) / std_devs_[i];
+    }
+    return true;
+  }
+private:
+  Eigen::Vector3d rotation_;
+  Eigen::Vector3d std_devs_;
+};
+
 struct ImageDistResidual {
   ImageDistResidual(cv::Point2f orig, Eigen::Vector4d p,
-      CameraModel::CameraParams cparams)
-      : orig_(orig), p_(p), cparams_(cparams) {}
+      CameraModel::CameraParams cparams, double std_dev, double weight)
+      : orig_(orig), p_(p), cparams_(cparams), std_dev_(std_dev),
+      weight_(weight) {}
   template <typename T> bool operator()(const T* const rotation,
                                         const T* const translation,
                                         T* residual) const
@@ -223,21 +254,24 @@ struct ImageDistResidual {
     T yl = ((-z * T(cparams_.f)) / x) + T(cparams_.cy);
 
     // Calculate the error between reprojected points
-    T ex = xl - T(orig_.x);
-    T ey = yl - T(orig_.y);
-    residual[0] = ex * ex;
-    residual[1] = ey * ey;
+    T ex = (xl - T(orig_.x)) / T(std_dev_);
+    T ey = (yl - T(orig_.y)) / T(std_dev_);
+    residual[0] = (ex * ex) * weight_;
+    residual[1] = (ey * ey) * weight_;
     return true;
   }
  private:
   const cv::Point2f orig_;
   const Eigen::Vector4d p_;
   const CameraModel::CameraParams cparams_;
+  const double std_dev_;
+  const double weight_;
 };
 
 Eigen::Matrix4d Keyframe::getPoseDiffImageSpace(
     std::vector<cv::Point2f>& prevPoints,
-    std::vector<Eigen::Vector4d>& currPoints)
+    std::vector<Eigen::Vector4d>& currPoints,
+    Eigen::Vector3d orientation)
 {
   if (!keyframe_ok_)
   {
@@ -251,19 +285,28 @@ Eigen::Matrix4d Keyframe::getPoseDiffImageSpace(
   double rotation[3] = {0, 0, 0};
   double translation[3] = {0, 0, 0};
   for (int i = 0; i < currPoints.size(); ++i) {
+    // Give all points a std_dev of 2 pixels for now
     problem.AddResidualBlock(
         new ceres::AutoDiffCostFunction<ImageDistResidual, 2, 3, 3>(
-          new ImageDistResidual(prevPoints[i], currPoints[i], cp)),
+          new ImageDistResidual(prevPoints[i], currPoints[i], cp, 2,
+              0.05)),
         new ceres::HuberLoss(1.0), rotation, translation);
   }
 
+  // Add imu residuals
+  Eigen::Vector3d o = orientation - keyframe_orientation_;
+  problem.AddResidualBlock(
+      new ceres::AutoDiffCostFunction<ImuResidual, 3, 3>(
+          new ImuResidual(o, Eigen::Vector3d(0.5, 0.5, 0.5))),
+          NULL, rotation);
+
   ceres::Solver::Options options;
   options.linear_solver_type = ceres::DENSE_QR;
-  options.minimizer_progress_to_stdout = false;
+  options.minimizer_progress_to_stdout = true;
 
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
-  //ROS_WARN_STREAM("Summary: " << summary.BriefReport());
+  ROS_WARN_STREAM("Summary: " << summary.BriefReport());
   ROS_ERROR_STREAM("Rotation" << rotation[0] << " " <<
       rotation[1] << " " << rotation[2]);
   ROS_ERROR_STREAM("Translation" << translation[0] << " "
