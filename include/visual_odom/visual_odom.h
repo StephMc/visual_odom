@@ -48,6 +48,7 @@ private:
   Keyframe *curr_keyframe_, *prev_keyframe_;
 
   sensor_msgs::Imu imu_data_;
+  bool imu_init_;
   boost::mutex imu_mutex_;
 };
 

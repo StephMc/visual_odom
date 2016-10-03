@@ -11,7 +11,7 @@
 
 Keyframe::Keyframe(cv::Mat &lframe, cv::Mat &rframe,
     CameraModel& camera_model, int max_feature_count,
-    sensor_msgs::Imu& imu) :
+    sensor_msgs::Imu& imu, Eigen::Matrix4d& keyframe_pose) :
     termcrit(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.03),
     subPixWinSize(10, 10),
     winSize(31, 31),
@@ -36,13 +36,30 @@ Keyframe::Keyframe(cv::Mat &lframe, cv::Mat &rframe,
   keyframe_ok_ = calculate3dPoints(lframe, rframe, keyframe3d_); 
   
   // TODO: extract std_dev
-  tf::Quaternion q(imu.orientation.x, imu.orientation.y,
-      imu.orientation.z, imu.orientation.w);
-  tf::Matrix3x3 m(q);
+  //tf::Quaternion q(imu.orientation.x, imu.orientation.y,
+  //    imu.orientation.z, imu.orientation.w);
+  Eigen::Matrix3d rotMat = keyframe_pose.block<3, 3>(0, 0);
+  keyframe_orientation_ = rotMat.eulerAngles(0, 1, 2);
+  keyframe_orientation_ *= 180.0 / M_PI;
+  keyframe_orientation_(0) *= -1;
+  if (fabs(keyframe_orientation_(0)) > 90)
+  {
+    ROS_WARN("Imu error %lf", keyframe_orientation_(0));
+    keyframe_orientation_(0) += 180;
+  }
+  keyframe_orientation_(1) *= -1;
+  if (fabs(keyframe_orientation_(1)) > 90)
+  {
+    ROS_WARN("Imu error %lf", keyframe_orientation_(1));
+    keyframe_orientation_(1) += 180;
+  }
+
+  ROS_ERROR_STREAM("Initial rot is " << keyframe_orientation_);
+  /*tf::Matrix3x3 m(q);
   double roll, pitch, yaw;
   m.getRPY(roll, pitch, yaw);
   keyframe_orientation_ = Eigen::Vector3d(
-      roll * (180 / M_PI), pitch * (180 / M_PI), yaw * (180 / M_PI));
+      roll * (180 / M_PI), pitch * (180 / M_PI), yaw * (180 / M_PI));*/
 }
 
 bool Keyframe::calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
@@ -295,6 +312,9 @@ Eigen::Matrix4d Keyframe::getPoseDiffImageSpace(
 
   // Add imu residuals
   Eigen::Vector3d o = orientation - keyframe_orientation_;
+  ROS_ERROR_STREAM("Imu target is " << o);
+  ROS_ERROR_STREAM("Imu raw is " << orientation);
+  ROS_ERROR_STREAM("Imu keyframe is " << keyframe_orientation_);
   problem.AddResidualBlock(
       new ceres::AutoDiffCostFunction<ImuResidual, 3, 3>(
           new ImuResidual(o, Eigen::Vector3d(0.5, 0.5, 0.5))),
@@ -311,6 +331,23 @@ Eigen::Matrix4d Keyframe::getPoseDiffImageSpace(
       rotation[1] << " " << rotation[2]);
   ROS_ERROR_STREAM("Translation" << translation[0] << " "
       << translation[1] << " " << translation[2]);
+
+  if (translation[0] > 2.0 || translation[1] > 2.0 ||
+      translation[2] > 2.0)
+  {
+    ROS_ERROR("Solver fucked up");
+    return Eigen::Matrix4d::Identity();
+  }
+
+  if (!summary.IsSolutionUsable())
+  {
+    ROS_ERROR("Solver fail");
+    abort();
+    return Eigen::Matrix4d::Identity();
+  }
+
+  ROS_WARN_STREAM("convergance type " << summary.termination_type);
+
   Eigen::Affine3d r(create_rotation_matrix(rotation[0] * (M_PI / 180.0),
         rotation[1] * (M_PI / 180.0), rotation[2] * (M_PI / 180.0)));
   Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(-translation[0],

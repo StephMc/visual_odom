@@ -28,7 +28,7 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
     right_sub_(nh, "/camera/right/image_raw", 1),
     //right_sub_(nh, "/usb_cam/right/image_raw", 1),
     sync_(ImageSyncPolicy(10), left_sub_, right_sub_),
-    curr_keyframe_(NULL), prev_keyframe_(NULL),
+    curr_keyframe_(NULL), prev_keyframe_(NULL), imu_init_(false),
     camera_model_(
         //CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
         //    699.395, 0.12, 0, 0, 0),
@@ -91,6 +91,7 @@ void VisualOdom::imuCallback(const sensor_msgs::Imu::ConstPtr& imu)
 {
   boost::mutex::scoped_lock lock(imu_mutex_);
   imu_data_ = *imu;
+  imu_init_ = true;
 }
 
 Eigen::Matrix3d VisualOdom::create_rotation_matrix(double ax, double ay, double az) {
@@ -133,11 +134,28 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
 
   if (curr_keyframe_ == NULL)
   {
+    if (!imu_init_)
+    {
+      ROS_WARN("No imu, skipping");
+      return;
+    }
     ROS_WARN("Initializing");
     //global_imu_ = imu;
+    
+    tf::Quaternion q(imu.orientation.x, imu.orientation.y,
+        imu.orientation.z, imu.orientation.w);
+    tf::Matrix3x3 m(q);
+    double roll, pitch, yaw;
+    m.getRPY(roll, pitch, yaw);
+    Eigen::Affine3d r(create_rotation_matrix(roll, pitch, yaw));
+
+    
+    Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(0, 0, 0)));
+    keyframe_pose_ = (t * r).matrix();
+
     need_new_keyframe_ = false;
     curr_keyframe_ = new Keyframe(lgrey, rgrey, camera_model_,
-        max_feature_count_, imu);
+        max_feature_count_, imu, keyframe_pose_);
   } 
 
   // Publish keyframe transform
@@ -312,7 +330,7 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     }
     prev_keyframe_ = curr_keyframe_;
     curr_keyframe_ = new Keyframe(lgrey, rgrey, camera_model_,
-        max_feature_count_, imu);
+        max_feature_count_, imu, keyframe_pose_);
 
     if (!curr_keyframe_->keyframe_ok_)
     {
