@@ -11,7 +11,7 @@ class Keyframe
 {
 public:
   Keyframe(cv::Mat &lframe, cv::Mat &rframe, CameraModel& camera_model,
-      int max_feature_count, sensor_msgs::Imu imu);
+      int max_feature_count, sensor_msgs::Imu& imu);
 
   Eigen::Matrix4d getRelativePose(cv::Mat& lframe, cv::Mat& rframe,
       Eigen::Vector3d orientation);

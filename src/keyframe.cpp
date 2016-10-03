@@ -11,10 +11,10 @@
 
 Keyframe::Keyframe(cv::Mat &lframe, cv::Mat &rframe,
     CameraModel& camera_model, int max_feature_count,
-    sensor_msgs::Imu imu) :
+    sensor_msgs::Imu& imu) :
     termcrit(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.03),
-    subPixWinSize(10,10),
-    winSize(31,31),
+    subPixWinSize(10, 10),
+    winSize(31, 31),
     camera_model_(camera_model)
 {
   cv::goodFeaturesToTrack(lframe, raw_features_, max_feature_count, 0.01,
