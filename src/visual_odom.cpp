@@ -24,21 +24,21 @@ using namespace message_filters;
 
 VisualOdom::VisualOdom(ros::NodeHandle &nh) :
     need_new_keyframe_(true),
-    //left_sub_(nh, "/camera/left/image_raw", 1),
-    left_sub_(nh, "/usb_cam/left/image_raw", 1),
-    //right_sub_(nh, "/camera/right/image_raw", 1),
-    right_sub_(nh, "/usb_cam/right/image_raw", 1),
+    left_sub_(nh, "/camera/left/image_raw", 1),
+    //left_sub_(nh, "/usb_cam/left/image_raw", 1),
+    right_sub_(nh, "/camera/right/image_raw", 1),
+    //right_sub_(nh, "/usb_cam/right/image_raw", 1),
     sync_(ImageSyncPolicy(10), left_sub_, right_sub_),
     curr_keyframe_(NULL), prev_keyframe_(NULL), imu_init_(false),
     camera_model_(
-        CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
-            699.395, 0.12, 0, 0, 0),
-        CameraModel::CameraParams(-0.170306, 0.0233104, 319.099, 218.565,
-            700.642, 0.12, 0.0166458, 0.0119791, 0.00187882))
-        //CameraModel::CameraParams(-0.173774, 0.0262478, 343.473, 231.115,
-        //    699.277, 0.12, 0, 0, 0),
-        //CameraModel::CameraParams(-0.172575, 0.0255858, 353.393, 229.306,
-        //    700.72, 0.12, 0.00251904, 0.0139689, 0.000205762))
+        //CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
+        //    699.395, 0.12, 0, 0, 0),
+        //CameraModel::CameraParams(-0.170306, 0.0233104, 319.099, 218.565,
+        //    700.642, 0.12, 0.0166458, 0.0119791, 0.00187882))
+        CameraModel::CameraParams(-0.173774, 0.0262478, 343.473, 231.115,
+            699.277, 0.12, 0, 0, 0),
+        CameraModel::CameraParams(-0.172575, 0.0255858, 353.393, 229.306,
+            700.72, 0.12, 0.00251904, 0.0139689, 0.000205762))
 {
   // Fetch config parameters
   nh.param("max_feature_count", max_feature_count_, 50);
@@ -55,8 +55,8 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
   sync_.registerCallback(
       boost::bind(&VisualOdom::callback, this, _1, _2));
 
-  //imu_sub_single_ = nh.subscribe("/mavros/imu/data", 1,
-  imu_sub_single_ = nh.subscribe("/imu", 1,
+  imu_sub_single_ = nh.subscribe("/mavros/imu/data", 1,
+  //imu_sub_single_ = nh.subscribe("/imu", 1,
       &VisualOdom::imuCallback, this);
 
   // Setup cloud pubishers
@@ -347,8 +347,9 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     }
     else
     {
+      // TODO: Handle better?
       ROS_ERROR("can't add pose, keyframe dead");
-      abort();
+      //abort();
     }
 
     curr_keyframe_ = new Keyframe(lgrey, rgrey, camera_model_,
