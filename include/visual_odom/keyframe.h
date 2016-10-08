@@ -15,7 +15,7 @@ public:
       Eigen::Matrix4d& keyframe_pose);
 
   Eigen::Matrix4d getRelativePose(cv::Mat& lframe, cv::Mat& rframe,
-      Eigen::Vector3d orientation);
+      Eigen::Quaterniond orientation);
 
   Eigen::Matrix4d getGroundRelativePose();
 
@@ -29,6 +29,7 @@ public:
   std::vector<Eigen::Vector4d>& getKeyframe3d();
 
   bool keyframe_ok_;
+  bool is_lost_;
 private:
   bool calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
     std::vector<Eigen::Vector4d> &points3d);
@@ -38,7 +39,7 @@ private:
   Eigen::Matrix4d getPoseDiffImageSpace(
     std::vector<cv::Point2f>& prevPoints,
     std::vector<Eigen::Vector4d>& currPoints,
-    Eigen::Vector3d orientation);
+    Eigen::Quaterniond orientation);
 
   void removeFeatures(std::vector<cv::Point2f> &lpoints,
     std::vector<cv::Point2f> &rpoints, std::vector<uchar> &status);
@@ -58,7 +59,7 @@ private:
   cv::Mat recent_;
 
   // Absolute rotation of the keyframe
-  Eigen::Vector3d keyframe_orientation_;
+  Eigen::Quaterniond keyframe_orientation_;
 
   // Uncorrected feature on keyframe
   std::vector<cv::Point2f> raw_features_;

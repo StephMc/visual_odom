@@ -20,6 +20,9 @@ private:
 
   Eigen::Matrix3d create_rotation_matrix(double ax, double ay, double az);
 
+  void publishTransform(Eigen::Matrix4d& pose,
+    std::string parent, std::string child);
+
   void callback(const sensor_msgs::ImageConstPtr& left_image,
       const sensor_msgs::ImageConstPtr& right_image);
 

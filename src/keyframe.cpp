@@ -1,5 +1,6 @@
 #include <visual_odom/keyframe.h>
 #include <visual_odom/camera_model.h>
+#include <visual_odom/ceres_extensions.h>
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 #include <ros/ros.h>
@@ -14,7 +15,7 @@ Keyframe::Keyframe(cv::Mat &lframe, cv::Mat &rframe,
     sensor_msgs::Imu& imu, Eigen::Matrix4d& keyframe_pose) :
     termcrit(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 20, 0.03),
     subPixWinSize(10, 10),
-    winSize(31, 31),
+    winSize(31, 31), is_lost_(false),
     camera_model_(camera_model)
 {
   cv::goodFeaturesToTrack(lframe, raw_features_, max_feature_count, 0.01,
@@ -36,30 +37,14 @@ Keyframe::Keyframe(cv::Mat &lframe, cv::Mat &rframe,
   keyframe_ok_ = calculate3dPoints(lframe, rframe, keyframe3d_); 
   
   // TODO: extract std_dev
-  //tf::Quaternion q(imu.orientation.x, imu.orientation.y,
-  //    imu.orientation.z, imu.orientation.w);
   Eigen::Matrix3d rotMat = keyframe_pose.block<3, 3>(0, 0);
-  keyframe_orientation_ = rotMat.eulerAngles(0, 1, 2);
-  keyframe_orientation_ *= 180.0 / M_PI;
-  keyframe_orientation_(0) *= -1;
-  if (fabs(keyframe_orientation_(0)) > 90)
-  {
-    ROS_WARN("Imu error %lf", keyframe_orientation_(0));
-    keyframe_orientation_(0) += 180;
-  }
-  keyframe_orientation_(1) *= -1;
-  if (fabs(keyframe_orientation_(1)) > 90)
-  {
-    ROS_WARN("Imu error %lf", keyframe_orientation_(1));
-    keyframe_orientation_(1) += 180;
-  }
+  keyframe_orientation_ = Eigen::Quaterniond(rotMat);
+  //keyframe_orientation_ = Eigen::Quaterniond(
+  //    imu.orientation.w, imu.orientation.x,
+  //    imu.orientation.y, imu.orientation.z);
 
-  ROS_ERROR_STREAM("Initial rot is " << keyframe_orientation_);
-  /*tf::Matrix3x3 m(q);
-  double roll, pitch, yaw;
-  m.getRPY(roll, pitch, yaw);
-  keyframe_orientation_ = Eigen::Vector3d(
-      roll * (180 / M_PI), pitch * (180 / M_PI), yaw * (180 / M_PI));*/
+  ROS_ERROR_STREAM("Initial rot is " <<
+      keyframe_orientation_.toRotationMatrix().eulerAngles(0, 1, 2));
 }
 
 bool Keyframe::calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
@@ -139,7 +124,7 @@ bool Keyframe::calculate3dPoints(cv::Mat &lframe, cv::Mat &rframe,
 }
 
 Eigen::Matrix4d Keyframe::getRelativePose(cv::Mat &lframe,
-    cv::Mat& rframe, Eigen::Vector3d orientation)
+    cv::Mat& rframe, Eigen::Quaterniond orientation)
 {
   keyframe_ok_ = calculate3dPoints(lframe, rframe, recent3d_);
   return getPoseDiffImageSpace(corrected_features_, recent3d_,
@@ -225,50 +210,85 @@ void Keyframe::drawPoints(cv::Mat& frame, std::vector<cv::Point2f> points,
   }
 }
 
-struct ImuResidual {
-  ImuResidual(Eigen::Vector3d rotation, Eigen::Vector3d std_devs) :
-    rotation_(rotation), std_devs_(std_devs) {}
+void debugImu(
+    const Eigen::Quaternion<double>& e,
+    const Eigen::Quaternion<double>& m,
+    const Eigen::Quaternion<double>& d,
+    const double& x, const double& y, const double& z)
+{
+  ROS_INFO_STREAM("got errors: " << x << " " << y << " " << z);
+}
 
-  template<typename T> bool operator()(const T* const rot,
+template<typename T> void debugImu(
+    const Eigen::Quaternion<T>& e,
+    const Eigen::Quaternion<T>& m,
+    const Eigen::Quaternion<T>& d,
+    const T& x, const T& y, const T& z)
+{
+  ROS_INFO_STREAM("got e " << e.w().a << " " << e.x().a << " " << e.y().a << " " << e.z().a);
+  ROS_INFO_STREAM("got m " << m.w().a << " " << m.x().a << " " << m.y().a << " " << m.z().a);
+  ROS_INFO_STREAM("got d " << d.w().a << " " << d.x().a << " " << d.y().a << " " << d.z().a);
+  ROS_INFO_STREAM("got errors: " << x.a << " " << y.a << " " << z.a);
+}
+
+struct ImuResidual {
+  ImuResidual(Eigen::Quaterniond rotation, double std_dev) :
+    rotation_(rotation), std_dev_(std_dev) {}
+
+  template<typename T> bool operator()(const T* const rotation,
       T* residual) const
   {
-    for (int i = 0; i < 3; ++i)
-    {
-      residual[i] = (rot[i] - rotation_[i]) / std_devs_[i];
-    }
+    Eigen::Quaternion<T> estimate =
+        Eigen::Map<const Eigen::Quaternion<T> >(rotation);
+
+    Eigen::Quaternion<T> measured(T(rotation_.w()), T(rotation_.x()),
+        T(rotation_.y()), T(rotation_.z()));
+
+    Eigen::Quaternion<T> diff = estimate * measured.conjugate();
+    Eigen::Quaternion<T> half = diff; //(diff.matrix() / T(2)); 
+    T q[4];
+    q[0] = half.w();
+    q[1] = half.x();
+    q[2] = half.y();
+    q[3] = half.z();
+
+    ceres::QuaternionToAngleAxis(q, residual);  
     return true;
   }
 private:
-  Eigen::Vector3d rotation_;
-  Eigen::Vector3d std_devs_;
+  Eigen::Quaterniond rotation_;
+  double std_dev_;
 };
 
 struct ImageDistResidual {
   ImageDistResidual(cv::Point2f orig, Eigen::Vector4d p,
       CameraModel::CameraParams cparams, double std_dev, double weight)
       : orig_(orig), p_(p), cparams_(cparams), std_dev_(std_dev),
-      weight_(weight) {}
+      weight_(weight)
+  {
+  }
+
   template <typename T> bool operator()(const T* const rotation,
                                         const T* const translation,
                                         T* residual) const
   {
-    // Rotate a by the passed in rotation and translation
-    T R[9];
-    T rot[3];
-    rot[0] = rotation[0] / T(2);
-    rot[1] = rotation[1] / T(2);
-    rot[2] = rotation[2] / T(2);
-    ceres::EulerAnglesToRotationMatrix<T>(rot, 3, R);
-    T x = R[0] * T(p_(0)) + R[1] * T(p_(1)) + R[2]* T(p_(2))
-        - translation[0];
-    T y = R[3] * T(p_(0)) + R[4] * T(p_(1)) + R[5]* T(p_(2))
-        - translation[1];
-    T z = R[6] * T(p_(0)) + R[7] * T(p_(1)) + R[8]* T(p_(2))
-        - translation[2];
+    Eigen::Matrix<T,3,1> point;
+    point << T(p_(0)), T(p_(1)), T(p_(2));
+
+    // Map the T* array to an Eigen Quaternion object
+    Eigen::Quaternion<T> q =
+        Eigen::Map<const Eigen::Quaternion<T> >(rotation);
+
+    Eigen::Matrix<T,3,1> t =
+        Eigen::Map<const Eigen::Matrix<T,3,1> >(translation);
    
+    // Transform point
+    Eigen::Matrix<T,3,1> p = (q.matrix() / T(2)) * point;
+    p += t;
+
     // Convert back into 2d space
-    T xl = ((-y * T(cparams_.f)) / x) + T(cparams_.cx);
-    T yl = ((-z * T(cparams_.f)) / x) + T(cparams_.cy);
+    T xl = ((-p[1] * T(cparams_.f)) / p[0]) + T(cparams_.cx);
+    T yl = ((-p[2] * T(cparams_.f)) / p[0]) + T(cparams_.cy);
 
     // Calculate the error between reprojected points
     T ex = (xl - T(orig_.x)) / T(std_dev_);
@@ -277,7 +297,8 @@ struct ImageDistResidual {
     residual[1] = (ey * ey) * weight_;
     return true;
   }
- private:
+
+private:
   const cv::Point2f orig_;
   const Eigen::Vector4d p_;
   const CameraModel::CameraParams cparams_;
@@ -288,37 +309,48 @@ struct ImageDistResidual {
 Eigen::Matrix4d Keyframe::getPoseDiffImageSpace(
     std::vector<cv::Point2f>& prevPoints,
     std::vector<Eigen::Vector4d>& currPoints,
-    Eigen::Vector3d orientation)
+    Eigen::Quaterniond orientation)
 {
-  if (!keyframe_ok_)
+  if (!keyframe_ok_ || currPoints.empty())
   {
+    is_lost_ = true;
     return Eigen::Matrix4d::Identity();
   }
 
   ceres::Problem problem;
   CameraModel::CameraParams cp = camera_model_.getAverageCamera();
+
   // TODO: Test if providing a better estimate helps
   // e.g. last cycle's estimate
-  double rotation[3] = {0, 0, 0};
+  double rotation[4] = {0, 0, 0, 1}; // x, y, z, w
   double translation[3] = {0, 0, 0};
+
+  ceres::LocalParameterization *quaternion_parameterization =
+      new ceres_ext::EigenQuaternionParameterization;
+      //new ceres::QuaternionParameterization;
   for (int i = 0; i < currPoints.size(); ++i) {
     // Give all points a std_dev of 2 pixels for now
     problem.AddResidualBlock(
-        new ceres::AutoDiffCostFunction<ImageDistResidual, 2, 3, 3>(
-          new ImageDistResidual(prevPoints[i], currPoints[i], cp, 2,
-              0.05)),
+        new ceres::AutoDiffCostFunction<ImageDistResidual, 2, 4, 3>(
+          new ImageDistResidual(prevPoints[i], currPoints[i], cp, 2, 0.005)),
         new ceres::HuberLoss(1.0), rotation, translation);
   }
 
   // Add imu residuals
-  Eigen::Vector3d o = orientation - keyframe_orientation_;
-  ROS_ERROR_STREAM("Imu target is " << o);
-  ROS_ERROR_STREAM("Imu raw is " << orientation);
-  ROS_ERROR_STREAM("Imu keyframe is " << keyframe_orientation_);
+  Eigen::Quaterniond d = keyframe_orientation_.inverse() * orientation;
+
+  ROS_ERROR("Imu target is %lf %lf %lf %lf", orientation.w(),
+      orientation.x(), orientation.y(), orientation.z());
+  ROS_ERROR("Imu keyframe is %lf %lf %lf %lf", keyframe_orientation_.w(),
+      keyframe_orientation_.x(), keyframe_orientation_.y(),
+      keyframe_orientation_.z());
+  ROS_ERROR("Imu diff is %lf %lf %lf %lf", d.w(), d.x(), d.y(), d.z());
+
   problem.AddResidualBlock(
-      new ceres::AutoDiffCostFunction<ImuResidual, 3, 3>(
-          new ImuResidual(o, Eigen::Vector3d(0.5, 0.5, 0.5))),
-          NULL, rotation);
+      new ceres::AutoDiffCostFunction<ImuResidual, 3, 4>(
+          new ImuResidual(d, 1)), NULL, rotation);
+  // Tell the solver rotation is a quaternion
+  problem.SetParameterization(rotation, quaternion_parameterization);
 
   ceres::Solver::Options options;
   options.linear_solver_type = ceres::DENSE_QR;
@@ -327,8 +359,14 @@ Eigen::Matrix4d Keyframe::getPoseDiffImageSpace(
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
   ROS_WARN_STREAM("Summary: " << summary.BriefReport());
-  ROS_ERROR_STREAM("Rotation" << rotation[0] << " " <<
-      rotation[1] << " " << rotation[2]);
+
+  Eigen::Quaterniond qrot(rotation[3], rotation[0], rotation[1],
+      rotation[2]);
+  Eigen::Vector3d rpy = qrot.toRotationMatrix().eulerAngles(0, 1, 2);
+  rpy *= 180.0 / M_PI;
+
+  ROS_ERROR("Rotation %lf %lf %lf %lf",
+      qrot.w(), qrot.x(), qrot.y(), qrot.z());
   ROS_ERROR_STREAM("Translation" << translation[0] << " "
       << translation[1] << " " << translation[2]);
 
@@ -336,6 +374,7 @@ Eigen::Matrix4d Keyframe::getPoseDiffImageSpace(
       translation[2] > 2.0)
   {
     ROS_ERROR("Solver fucked up");
+    is_lost_ = true;
     return Eigen::Matrix4d::Identity();
   }
 
@@ -348,11 +387,12 @@ Eigen::Matrix4d Keyframe::getPoseDiffImageSpace(
 
   ROS_WARN_STREAM("convergance type " << summary.termination_type);
 
-  Eigen::Affine3d r(create_rotation_matrix(rotation[0] * (M_PI / 180.0),
-        rotation[1] * (M_PI / 180.0), rotation[2] * (M_PI / 180.0)));
-  Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(-translation[0],
-          -translation[1], -translation[2])));
+  Eigen::Affine3d r(qrot.toRotationMatrix());
+  Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(translation[0],
+          translation[1], translation[2])));
   Eigen::Matrix4d pose = (t * r).matrix();
+  
+  is_lost_ = false;
   return pose;
 }
 

@@ -18,26 +18,27 @@
 #include <ceres/rotation.h>
 #include <nav_msgs/Odometry.h>
 #include <boost/assign.hpp>
+#include <tf_conversions/tf_eigen.h>
 
 using namespace message_filters;
 
 VisualOdom::VisualOdom(ros::NodeHandle &nh) :
     need_new_keyframe_(true),
-    left_sub_(nh, "/camera/left/image_raw", 1),
-    //left_sub_(nh, "/usb_cam/left/image_raw", 1),
-    right_sub_(nh, "/camera/right/image_raw", 1),
-    //right_sub_(nh, "/usb_cam/right/image_raw", 1),
+    //left_sub_(nh, "/camera/left/image_raw", 1),
+    left_sub_(nh, "/usb_cam/left/image_raw", 1),
+    //right_sub_(nh, "/camera/right/image_raw", 1),
+    right_sub_(nh, "/usb_cam/right/image_raw", 1),
     sync_(ImageSyncPolicy(10), left_sub_, right_sub_),
     curr_keyframe_(NULL), prev_keyframe_(NULL), imu_init_(false),
     camera_model_(
-        //CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
-        //    699.395, 0.12, 0, 0, 0),
-        //CameraModel::CameraParams(-0.170306, 0.0233104, 319.099, 218.565,
-        //    700.642, 0.12, 0.0166458, 0.0119791, 0.00187882))
-        CameraModel::CameraParams(-0.173774, 0.0262478, 343.473, 231.115,
-            699.277, 0.12, 0, 0, 0),
-        CameraModel::CameraParams(-0.172575, 0.0255858, 353.393, 229.306,
-            700.72, 0.12, 0.00251904, 0.0139689, 0.000205762))
+        CameraModel::CameraParams(-0.169477, 0.0221934, 357.027, 246.735,
+            699.395, 0.12, 0, 0, 0),
+        CameraModel::CameraParams(-0.170306, 0.0233104, 319.099, 218.565,
+            700.642, 0.12, 0.0166458, 0.0119791, 0.00187882))
+        //CameraModel::CameraParams(-0.173774, 0.0262478, 343.473, 231.115,
+        //    699.277, 0.12, 0, 0, 0),
+        //CameraModel::CameraParams(-0.172575, 0.0255858, 353.393, 229.306,
+        //    700.72, 0.12, 0.00251904, 0.0139689, 0.000205762))
 {
   // Fetch config parameters
   nh.param("max_feature_count", max_feature_count_, 50);
@@ -54,7 +55,8 @@ VisualOdom::VisualOdom(ros::NodeHandle &nh) :
   sync_.registerCallback(
       boost::bind(&VisualOdom::callback, this, _1, _2));
 
-  imu_sub_single_ = nh.subscribe("/mavros/imu/data", 1,
+  //imu_sub_single_ = nh.subscribe("/mavros/imu/data", 1,
+  imu_sub_single_ = nh.subscribe("/imu", 1,
       &VisualOdom::imuCallback, this);
 
   // Setup cloud pubishers
@@ -113,6 +115,21 @@ void VisualOdom::drawPoints(cv::Mat& frame,
   }
 }
 
+void VisualOdom::publishTransform(Eigen::Matrix4d& pose,
+    std::string parent, std::string child)
+{
+  tf::Transform transform;
+  transform.setOrigin(
+      tf::Vector3(pose(0, 3), pose(1, 3), pose(2, 3)));
+  tf::Quaternion qTf;
+  Eigen::Matrix3d rotMat = pose.block<3, 3>(0, 0);
+  Eigen::Quaterniond q(rotMat);
+  tf::quaternionEigenToTF(q, qTf);
+  transform.setRotation(qTf);
+  br_.sendTransform(tf::StampedTransform(
+      transform, ros::Time::now(), parent, child));
+}
+
 void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     const sensor_msgs::ImageConstPtr& right_image)
 {
@@ -120,6 +137,8 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
   {
     boost::mutex::scoped_lock lock(imu_mutex_);
     imu = imu_data_;
+    ROS_ERROR("Imu raw is %lf %lf %lf %lf", imu.orientation.w,
+        imu.orientation.x, imu.orientation.y, imu.orientation.z);
   }
 
   // TODO don't copy here
@@ -142,14 +161,9 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     ROS_WARN("Initializing");
     //global_imu_ = imu;
     
-    tf::Quaternion q(imu.orientation.x, imu.orientation.y,
-        imu.orientation.z, imu.orientation.w);
-    tf::Matrix3x3 m(q);
-    double roll, pitch, yaw;
-    m.getRPY(roll, pitch, yaw);
-    Eigen::Affine3d r(create_rotation_matrix(roll, pitch, yaw));
-
-    
+    Eigen::Quaterniond q(imu.orientation.w, imu.orientation.x,
+        imu.orientation.y, imu.orientation.z);
+    Eigen::Affine3d r(q.toRotationMatrix());
     Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(0, 0, 0)));
     keyframe_pose_ = (t * r).matrix();
 
@@ -159,32 +173,31 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
   } 
 
   // Publish keyframe transform
-  tf::Transform ktransform;
-  ktransform.setOrigin(
-      tf::Vector3(keyframe_pose_(0, 3), keyframe_pose_(1, 3),
-          keyframe_pose_(2, 3)));
+  publishTransform(keyframe_pose_, "map", "keyframe");
 
-  tf::Quaternion kq;
-  Eigen::Matrix3d krotMat = keyframe_pose_.block<3, 3>(0, 0);
-  Eigen::Vector3d krot = krotMat.eulerAngles(0, 1, 2); 
-  kq.setRPY(krot(0), krot(1), krot(2));
-  ktransform.setRotation(kq);
+  // Publish IMU transform
+  Eigen::Quaterniond q(imu.orientation.w, imu.orientation.x,
+        imu.orientation.y, imu.orientation.z);
+  Eigen::Affine3d r(q.toRotationMatrix());
+  Eigen::Affine3d t(Eigen::Translation3d(Eigen::Vector3d(0, 0, 0)));
+  Eigen::Matrix4d imu_pose = (t * r).matrix();
+  publishTransform(imu_pose, "map", "imu");
 
-  br_.sendTransform(tf::StampedTransform(
-      ktransform, ros::Time::now(), "map", "keyframe")); 
+  Eigen::Vector3d pre_imu =
+      q.toRotationMatrix().eulerAngles(0, 1, 2);
+  ROS_ERROR_STREAM("Imu target is " << pre_imu);
 
   // Get camera pose
-  tf::Quaternion imu_q(imu.orientation.x, imu.orientation.y,
-      imu.orientation.z, imu.orientation.w);
-  tf::Matrix3x3 m(imu_q);
-  double roll, pitch, yaw;
-  m.getRPY(roll, pitch, yaw);
-  Eigen::Vector3d orientation = Eigen::Vector3d(
-      roll * (180 / M_PI), pitch * (180 / M_PI), yaw * (180 / M_PI));
-  //ROS_ERROR("imu: %lf %lf %lf", orientation(0), orientation(1), orientation(2));
+  //Eigen::Quaterniond imu_q(imu.orientation.w, imu.orientation.x,
+  //    imu.orientation.y, imu.orientation.z);
+  Eigen::Matrix4d est_pose =
+    curr_keyframe_->getRelativePose(lgrey, rgrey, q);
 
-  camera_pose_ = curr_keyframe_->getRelativePose(lgrey, rgrey,
-      orientation);
+  // Don't change the estimate from last time
+  if (!curr_keyframe_->is_lost_)
+  {
+    camera_pose_ = est_pose;
+  }
 
   // Get pose relative to ground (uses latest solution to getRelativePose)
   /*Eigen::Matrix4d ground_relative_pose_ =
@@ -219,19 +232,8 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
   }
   publishPointCloud(t_points3d, "keyframe", debug_cloud_pub_);
 
-  // Publish transform
-  tf::Transform transform;
-  transform.setOrigin(tf::Vector3(camera_pose_(0, 3),
-      camera_pose_(1, 3), camera_pose_(2, 3)));
-
-  tf::Quaternion q;
-  Eigen::Matrix3d rotMat = camera_pose_.block<3, 3>(0, 0);
-  Eigen::Vector3d rot = rotMat.eulerAngles(0, 1, 2); 
-  q.setRPY(rot(0), rot(1), rot(2));
-  transform.setRotation(q);
-
-  br_.sendTransform(tf::StampedTransform(
-        transform, ros::Time::now(), "keyframe", "camera")); 
+  // Publish camera transform
+  publishTransform(camera_pose_, "keyframe", "camera");
 
   // Publish odometry
   Eigen::Matrix4d current_pose = keyframe_pose_ * camera_pose_;
@@ -293,7 +295,10 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
 
   // Check if we're currently far enough away from the keyframe to
   // trigger getting a new keyframe
+  // TODO: burn the euler angles
   double max_rad = 0.16; // ~5 degrees
+  Eigen::Matrix3d rotMat = camera_pose_.block<3, 3>(0, 0);
+  Eigen::Vector3d rot = rotMat.eulerAngles(0, 1, 2);
   double rx = fabs(rot(0));
   double ry = fabs(rot(1));
   double rz = fabs(rot(2));
@@ -320,6 +325,12 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
     need_new_keyframe_ = true;
   }
 
+  if (curr_keyframe_->is_lost_)
+  {
+    ROS_INFO("New keyframe due to error in estimate");
+    need_new_keyframe_ = true;
+  }
+
   if (need_new_keyframe_)
   {
     ROS_WARN("Getting new keyframe");
@@ -329,6 +340,17 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
       free(prev_keyframe_);
     }
     prev_keyframe_ = curr_keyframe_;
+    
+    if (prev_keyframe_->keyframe_ok_) {
+      // Add to last keyframe estimate
+      keyframe_pose_ = keyframe_pose_ * camera_pose_;
+    }
+    else
+    {
+      ROS_ERROR("can't add pose, keyframe dead");
+      abort();
+    }
+
     curr_keyframe_ = new Keyframe(lgrey, rgrey, camera_model_,
         max_feature_count_, imu, keyframe_pose_);
 
@@ -337,16 +359,10 @@ void VisualOdom::callback(const sensor_msgs::ImageConstPtr& left_image,
       need_new_keyframe_ = true;
       free(curr_keyframe_);
       curr_keyframe_ = NULL;
+      ROS_ERROR("keyframe is fucked");
+      abort();
     }
-
-    if (prev_keyframe_ != NULL)
-    {
-      if (prev_keyframe_->keyframe_ok_) {
-        // Add to last keyframe estimate
-        keyframe_pose_ = keyframe_pose_ * camera_pose_;
-      }
-    }
-  } 
+  }
 }
 
 int main(int argc, char** argv)
